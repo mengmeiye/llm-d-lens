@@ -59,6 +59,8 @@ _DISCOVERY = (
     ("services", "svc", "v1", "true", "Service"),
     ("namespaces", "ns", "v1", "false", "Namespace"),
     ("configmaps", "cm", "v1", "true", "ConfigMap"),
+    ("roles", "", "rbac.authorization.k8s.io/v1", "true", "Role"),
+    ("rolebindings", "", "rbac.authorization.k8s.io/v1", "true", "RoleBinding"),
 )
 
 
@@ -1142,6 +1144,48 @@ def test_cli_list_prints_stack_inventories_not_catalog_rows(tmp_path, monkeypatc
 
     assert cli_main(["list", "--namespace", "team-a"]) == 0
     assert capsys.readouterr().out == "team-a/demo\tinstalled\n"
+
+
+@pytest.mark.asyncio
+async def test_preflight_checks_binding_permission_for_roles_created_by_the_same_plan(tmp_path):
+    class RouterRbacRunner(FakeRunner):
+        async def __call__(self, argv, *, input=None, timeout=None):  # noqa: A002
+            command = list(argv)
+            if command[:2] == ["helm", "template"]:
+                self.commands.append(command)
+                self.inputs.append(input)
+                role = {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role", "metadata": {"name": "epp"}}
+                binding = {
+                    "apiVersion": "rbac.authorization.k8s.io/v1",
+                    "kind": "RoleBinding",
+                    "metadata": {"name": "epp"},
+                    "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "epp"},
+                }
+                return _result(argv, stdout=yaml.safe_dump_all([role, binding]))
+            if command[:3] == ["kubectl", "auth", "can-i"]:
+                self.commands.append(command)
+                self.inputs.append(input)
+                return _result(argv, stdout="yes\n")
+            return await super().__call__(argv, input=input, timeout=timeout)
+
+    runner = RouterRbacRunner()
+    await NamespaceDeployer(_source(tmp_path), runner=runner).render(
+        namespace="team-a",
+        name="demo",
+        guide="optimized-baseline",
+        overlay="guides/optimized-baseline/modelserver/gpu/vllm/base",
+    )
+
+    dry_runs = [
+        stdin for command, stdin in zip(runner.commands, runner.inputs, strict=True) if "--dry-run=server" in command
+    ]
+    dry_run_kinds = [document["kind"] for document in yaml.safe_load_all(dry_runs[0])]
+    assert "Role" in dry_run_kinds
+    assert "RoleBinding" not in dry_run_kinds
+    assert any(
+        command[:5] == ["kubectl", "auth", "can-i", "create", "rolebindings.rbac.authorization.k8s.io"]
+        for command in runner.commands
+    )
 
 
 def test_local_ui_refuses_non_loopback_bind(tmp_path, capsys):

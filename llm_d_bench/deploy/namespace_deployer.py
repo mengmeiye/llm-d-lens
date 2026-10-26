@@ -637,10 +637,48 @@ class NamespaceDeployer:
         return _parse_api_resource_scopes(discovery.stdout)
 
     async def _server_dry_run(self, namespace: str, model_manifest: str, router_manifest: str) -> None:
-        await self._command(
-            ["kubectl", "apply", "--dry-run=server", "--namespace", namespace, "--filename=-"],
-            stdin=f"{router_manifest}\n---\n{model_manifest}",
-        )
+        documents = [
+            *_parse_documents(router_manifest, "Helm"),
+            *(yaml.safe_load_all(model_manifest) if model_manifest.strip() else ()),
+        ]
+        # A server dry-run stores nothing, so a RoleBinding to a Role from the same plan
+        # fails its escalation check for users without the RBAC "bind" verb. The Role
+        # itself is dry-run (proving the user holds its rules), and Helm or kubectl
+        # create it before the binding, so only the right to create bindings is checked.
+        planned_roles = {
+            document["metadata"]["name"]
+            for document in documents
+            if isinstance(document, dict) and document.get("kind") == "Role"
+        }
+        deferred = [
+            document
+            for document in documents
+            if isinstance(document, dict)
+            and document.get("kind") == "RoleBinding"
+            and (document.get("roleRef") or {}).get("kind") == "Role"
+            and (document.get("roleRef") or {}).get("name") in planned_roles
+        ]
+        checked = [document for document in documents if isinstance(document, dict) and document not in deferred]
+        if checked:
+            await self._command(
+                ["kubectl", "apply", "--dry-run=server", "--namespace", namespace, "--filename=-"],
+                stdin=yaml.safe_dump_all(checked, sort_keys=False),
+            )
+        if deferred:
+            result = await self._command(
+                [
+                    "kubectl",
+                    "auth",
+                    "can-i",
+                    "create",
+                    "rolebindings.rbac.authorization.k8s.io",
+                    "--namespace",
+                    namespace,
+                ],
+                check=False,
+            )
+            if result.stdout.strip() != "yes":
+                raise DomainValidationError(f"the plan creates RoleBindings, which are not allowed in {namespace!r}")
 
     async def _refuse_existing_inventory(self, namespace: str, name: str) -> None:
         result = await self._command(
