@@ -79,7 +79,7 @@ const ITEM_THEMES = {
 };
 
 export default function LeftNavigation({ currentView, onNavigate, isMobileOpen, isExpanded: controlledExpanded, onExpandedChange }) {
-    const { canView, principal, logout } = useAuth();
+    const { canView, principal, logout, sessionMode } = useAuth();
     const [accountMenuOpen, setAccountMenuOpen] = useState(false);
     const [showChangePassword, setShowChangePassword] = useState(false);
     const [uncontrolledExpanded, setUncontrolledExpanded] = useState(() => {
@@ -259,23 +259,16 @@ export default function LeftNavigation({ currentView, onNavigate, isMobileOpen, 
                     'relative border-t border-slate-900/65 py-3 flex items-center gap-2 text-xs text-slate-400 shrink-0',
                     isExpanded ? 'px-4 justify-between' : 'px-3 justify-center'
                 )}>
-                    {accountMenuOpen && (
+                    {sessionMode !== 'local' && accountMenuOpen && (
                         <div className="fixed inset-0 z-40" onClick={() => setAccountMenuOpen(false)} aria-hidden="true" />
                     )}
-                    <button
-                        type="button"
-                        onClick={() => setAccountMenuOpen((open) => !open)}
-                        className="relative z-50 flex min-w-0 items-center gap-2"
-                        title={principal.username}
-                        aria-haspopup="menu"
-                        aria-expanded={accountMenuOpen}
-                    >
+                    <div className="relative z-50 flex min-w-0 items-center gap-2" title={principal.username}>
                         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-slate-700 bg-slate-900 text-sm font-semibold uppercase text-slate-100">
                             {(principal.username || '?').slice(0, 1)}
                         </span>
                         {isExpanded && <span className="truncate text-sm text-slate-200">{principal.username}</span>}
-                    </button>
-                    {isExpanded && (
+                    </div>
+                    {sessionMode !== 'local' && isExpanded && (
                         <button
                             type="button"
                             onClick={() => setAccountMenuOpen((open) => !open)}
@@ -287,7 +280,7 @@ export default function LeftNavigation({ currentView, onNavigate, isMobileOpen, 
                             <Menu size={16} />
                         </button>
                     )}
-                    {accountMenuOpen && (
+                    {sessionMode !== 'local' && accountMenuOpen && (
                         <div
                             role="menu"
                             className={cn(
@@ -327,7 +320,7 @@ export default function LeftNavigation({ currentView, onNavigate, isMobileOpen, 
                 </button>
             </div>
         </aside>
-        {showChangePassword && (
+        {sessionMode !== 'local' && showChangePassword && (
             <ChangePasswordModal
                 onClose={() => setShowChangePassword(false)}
                 onSaved={() => setShowChangePassword(false)}

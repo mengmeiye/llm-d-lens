@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { canAccessView, hasPermission, permissionMatches } from './permissions.js';
+import {
+    canAccessLocalNamespaceView,
+    canAccessView,
+    hasPermission,
+    LOCAL_NAMESPACE_PERMISSIONS,
+    permissionMatches,
+} from './permissions.js';
 
 test('permissionMatches supports segment wildcards', () => {
     assert.equal(permissionMatches('deployment:run:read', 'deployment:run:read'), true);
@@ -46,5 +52,19 @@ test('a model-service consumer only sees model-service and usage', () => {
     for (const view of NAV_VIEWS) {
         const expected = view === 'model-service' || view === 'usage';
         assert.equal(canAccessView(consumer, view), expected, `${view} visibility for a model-service consumer`);
+    }
+});
+
+test('the implicit local namespace operator only sees clusters and deployments', () => {
+    assert.deepEqual(LOCAL_NAMESPACE_PERMISSIONS, [
+        'deployment:run:read',
+        'deployment:run:create',
+        'deployment:execution:delete',
+    ]);
+    for (const view of NAV_VIEWS) {
+        assert.equal(
+            canAccessLocalNamespaceView(view),
+            view === 'clusters' || view === 'optimization-deployments'
+        );
     }
 });

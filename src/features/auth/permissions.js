@@ -19,6 +19,18 @@ export function hasPermission(permissions = [], required) {
     return permissions.some((granted) => permissionMatches(granted, required));
 }
 
+export const LOCAL_NAMESPACE_PERMISSIONS = Object.freeze([
+    'deployment:run:read',
+    'deployment:run:create',
+    'deployment:execution:delete',
+]);
+
+const LOCAL_NAMESPACE_VIEWS = new Set(['clusters', 'optimization-deployments']);
+
+export function canAccessLocalNamespaceView(view) {
+    return LOCAL_NAMESPACE_VIEWS.has(view);
+}
+
 // Any-of semantics: a view is visible when the principal holds one of these.
 export const VIEW_PERMISSIONS = {
     'model-market': ['deployment:run:read'],
