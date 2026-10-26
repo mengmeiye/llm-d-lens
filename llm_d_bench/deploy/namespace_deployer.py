@@ -301,6 +301,17 @@ class NamespaceDeployer:
             recommended_profile=recommended_profile,
         )
 
+    def with_connection(self, kubeconfig: str | Path | None, context: str | None = None) -> NamespaceDeployer:
+        """Return an equivalent deployer bound to one Kubernetes connection."""
+
+        return type(self)(
+            self.source_root,
+            kubeconfig=kubeconfig,
+            context=context,
+            timeout_seconds=self.timeout_seconds,
+            runner=self._runner,
+        )
+
     async def render(
         self,
         *,

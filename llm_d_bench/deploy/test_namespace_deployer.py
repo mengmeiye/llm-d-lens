@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 
 import pytest
 import yaml
+from fastapi.testclient import TestClient
 
 from llm_d_bench.core.exceptions import ConflictError, DomainValidationError
+from llm_d_bench.deploy.local_api import create_local_app
 from llm_d_bench.deploy.namespace_deployer import (
     DEPLOYMENT_LABEL,
     DeploymentCommandError,
@@ -319,6 +322,44 @@ async def test_capabilities_keep_multiple_registered_accelerators_manual(tmp_pat
     )
 
 
+def test_local_capabilities_degrade_on_rbac_denial_without_exposing_cluster_details(tmp_path):
+    class DeniedRunner(FakeRunner):
+        async def __call__(self, argv, *, input=None, timeout=None):  # noqa: A002
+            command = list(argv)
+            self.commands.append(command)
+            self.inputs.append(input)
+            if command[:2] == ["kubectl", "version"]:
+                return _result(argv, returncode=1, stderr="request unavailable")
+            if command[:3] in (
+                ["kubectl", "get", "nodes"],
+                ["kubectl", "get", "resourceslices.resource.k8s.io"],
+            ):
+                return _result(argv, returncode=1, stderr="Error from server (Forbidden)")
+            if command[:3] == ["kubectl", "api-resources", "--api-group=config.openshift.io"]:
+                return _result(argv, returncode=1, stderr="Error from server (Forbidden)")
+            return await super().__call__(argv, input=input, timeout=timeout)
+
+    app = create_local_app(
+        NamespaceDeployer(_source(tmp_path), runner=DeniedRunner()),
+        web_root=tmp_path / "unbuilt",
+    )
+
+    response = TestClient(app, base_url="http://localhost").get("/api/local/v1/cluster-capabilities")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "accelerators": [],
+        "acceleratorStatus": "permission-limited",
+        "acceleratorReason": "Accelerator detection needs read access to Nodes or ResourceSlices; choose one manually.",
+        "platform": None,
+        "platformLabel": None,
+        "platformStatus": "permission-limited",
+        "platformReason": "Platform detection is permission-limited; choose a profile manually.",
+        "recommendedProfile": None,
+    }
+    assert "Forbidden" not in response.text
+
+
 @pytest.mark.asyncio
 async def test_capabilities_degrade_when_kubectl_is_unavailable(tmp_path):
     async def unavailable_runner(argv, *, input=None, timeout=None):  # noqa: A002, ARG001
@@ -626,3 +667,190 @@ async def test_discovery_failure_stops_before_dry_run(tmp_path):
             guide="optimized-baseline",
             overlay="guides/optimized-baseline/modelserver/gpu/vllm/base",
         )
+
+
+def test_local_app_serves_mode_info_without_database(tmp_path):
+    source = _source(tmp_path)
+    app = create_local_app(NamespaceDeployer(source, runner=FakeRunner()), web_root=tmp_path / "unbuilt")
+
+    response = TestClient(app, base_url="http://localhost").get("/api/local/v1/info")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "mode": "local",
+        "source": str(source),
+        "database": False,
+        "connection": {
+            "source": "ambient",
+            "context": None,
+            "contexts": [],
+            "ephemeral": False,
+            "activeConnectionId": "ambient",
+            "connections": [
+                {
+                    "id": "ambient",
+                    "label": "Current kubectl context",
+                    "source": "ambient",
+                    "context": None,
+                    "contexts": [],
+                    "ephemeral": False,
+                    "active": True,
+                }
+            ],
+        },
+    }
+
+
+def test_local_app_passes_model_selection_to_shared_render(tmp_path, monkeypatch):
+    monkeypatch.setenv("LENS_SCRATCH_DIR", str(tmp_path / "scratch"))
+    runner = FakeRunner()
+    app = create_local_app(NamespaceDeployer(_source(tmp_path), runner=runner), web_root=tmp_path / "unbuilt")
+
+    response = TestClient(app, base_url="http://localhost").post(
+        "/api/local/v1/render",
+        json={
+            "namespace": "team-a",
+            "name": "demo",
+            "guide": "optimized-baseline",
+            "overlay": "guides/optimized-baseline/modelserver/gpu/vllm/base",
+            "model": "acme/new-model",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["model"] == "acme/new-model"
+    assert any("acme/new-model" in values for values in runner.helm_values)
+
+
+def test_local_app_keeps_multiple_ephemeral_kubeconfigs_and_switches_context(tmp_path, monkeypatch):
+    scratch = tmp_path / "scratch"
+    monkeypatch.setenv("LENS_SCRATCH_DIR", str(scratch))
+    app = create_local_app(
+        NamespaceDeployer(_source(tmp_path), runner=FakeRunner()),
+        web_root=tmp_path / "unbuilt",
+    )
+    kubeconfig = b"""\
+apiVersion: v1
+kind: Config
+clusters:
+  - name: local
+    cluster: {}
+contexts:
+  - name: team-a
+    context: {cluster: local}
+  - name: team-b
+    context: {cluster: local}
+current-context: team-a
+"""
+
+    with TestClient(app, base_url="http://localhost") as client:
+        imported = client.post(
+            "/api/local/v1/connection",
+            files={"file": ("config", kubeconfig, "application/yaml")},
+        )
+
+        assert imported.status_code == 200
+        imported_info = imported.json()
+        first_connection_id = imported_info["activeConnectionId"]
+        assert first_connection_id.startswith("uploaded-")
+        assert {key: imported_info[key] for key in ("source", "context", "contexts", "ephemeral")} == {
+            "source": "uploaded",
+            "context": "team-a",
+            "contexts": ["team-a", "team-b"],
+            "ephemeral": True,
+        }
+        assert len(imported_info["connections"]) == 2
+        assert imported_info["connections"][-1]["label"] == "config"
+        assert "clusters" not in imported.text
+        first_path = Path(app.state.local_connection.current_deployer().kubeconfig)
+        assert first_path.read_bytes() == kubeconfig
+        assert stat.S_IMODE(first_path.stat().st_mode) == 0o600
+
+        second = client.post(
+            "/api/local/v1/connection",
+            files={"file": ("another-config", kubeconfig, "application/yaml")},
+        )
+        second_connection_id = second.json()["activeConnectionId"]
+        second_path = Path(app.state.local_connection.current_deployer().kubeconfig)
+        assert second_connection_id != first_connection_id
+        assert len(second.json()["connections"]) == 3
+
+        selected = client.post(
+            "/api/local/v1/connection/context",
+            json={"context": "team-b", "connectionId": first_connection_id},
+        )
+        assert selected.status_code == 200
+        assert selected.json()["context"] == "team-b"
+        assert selected.json()["activeConnectionId"] == first_connection_id
+        assert app.state.local_connection.current_deployer().context == "team-b"
+
+        removed = client.delete(f"/api/local/v1/connection/{second_connection_id}")
+        assert removed.status_code == 200
+        assert len(removed.json()["connections"]) == 2
+        assert removed.json()["activeConnectionId"] == first_connection_id
+
+        startup_remove = client.delete("/api/local/v1/connection/ambient")
+        assert startup_remove.status_code == 422
+        assert startup_remove.json()["detail"] == "The startup or ambient connection cannot be removed"
+
+    assert not first_path.exists()
+    assert not second_path.exists()
+
+
+def test_local_app_rejects_invalid_kubeconfig_without_replacing_connection(tmp_path):
+    app = create_local_app(
+        NamespaceDeployer(_source(tmp_path), runner=FakeRunner()),
+        web_root=tmp_path / "unbuilt",
+    )
+
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.post(
+            "/api/local/v1/connection",
+            files={"file": ("config", b"kind: Config\ncontexts: []\n", "application/yaml")},
+        )
+
+        assert response.status_code == 422
+        assert response.json()["code"] == "validation_failed"
+        assert client.get("/api/local/v1/info").json()["connection"]["source"] == "ambient"
+
+
+def test_local_app_rejects_cross_origin_kubeconfig_import(tmp_path):
+    app = create_local_app(
+        NamespaceDeployer(_source(tmp_path), runner=FakeRunner()),
+        web_root=tmp_path / "unbuilt",
+    )
+
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.post(
+            "/api/local/v1/connection",
+            files={"file": ("config", b"kind: Config\n", "application/yaml")},
+            headers={"origin": "https://example.invalid"},
+        )
+
+        assert response.status_code == 403
+        assert client.get("/api/local/v1/info").json()["connection"]["source"] == "ambient"
+
+
+def test_local_app_rejects_oversized_kubeconfig(tmp_path):
+    app = create_local_app(
+        NamespaceDeployer(_source(tmp_path), runner=FakeRunner()),
+        web_root=tmp_path / "unbuilt",
+    )
+
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.post(
+            "/api/local/v1/connection",
+            files={"file": ("config", b"x" * (1024 * 1024 + 1), "application/yaml")},
+        )
+
+        assert response.status_code == 422
+        assert response.json()["detail"] == "Kubeconfig must not exceed 1 MiB"
+
+
+def test_local_app_rejects_non_loopback_host_header(tmp_path):
+    app = create_local_app(NamespaceDeployer(_source(tmp_path), runner=FakeRunner()), web_root=tmp_path / "unbuilt")
+
+    response = TestClient(app, base_url="http://localhost").get("/api/local/v1/info", headers={"host": "example.test"})
+
+    assert response.status_code == 400
+    assert response.text == "Invalid host header"
