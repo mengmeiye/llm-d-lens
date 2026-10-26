@@ -298,6 +298,73 @@ async def test_render_binds_namespace_labels_and_retains_pvc(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_render_overrides_guide_model_references_and_router_values(tmp_path, monkeypatch):
+    monkeypatch.setenv("LENS_SCRATCH_DIR", str(tmp_path / "scratch"))
+    runner = FakeRunner()
+    deployer = NamespaceDeployer(_source(tmp_path), runner=runner)
+
+    plan = await deployer.render(
+        namespace="team-a",
+        name="demo",
+        guide="optimized-baseline",
+        overlay="guides/optimized-baseline/modelserver/gpu/vllm/base",
+        model="acme/new-model",
+    )
+
+    [deployment, _claim] = list(yaml.safe_load_all(plan.model_manifest))
+    assert plan.model == "acme/new-model"
+    assert deployment["metadata"]["labels"]["llm-d.ai/model"] == "new-model"
+    assert deployment["spec"]["template"]["metadata"]["labels"]["llm-d.ai/model"] == "new-model"
+    assert deployment["spec"]["template"]["spec"]["containers"][0]["args"] == ["acme/new-model"]
+    assert any("acme/new-model" in values for values in runner.helm_values)
+    assert all("example/model" not in values for values in runner.helm_values)
+
+
+@pytest.mark.asyncio
+async def test_render_rejects_invalid_hugging_face_model_id(tmp_path):
+    deployer = NamespaceDeployer(_source(tmp_path), runner=FakeRunner())
+
+    with pytest.raises(DomainValidationError, match="Hugging Face model ID"):
+        await deployer.render(
+            namespace="team-a",
+            name="demo",
+            guide="optimized-baseline",
+            overlay="guides/optimized-baseline/modelserver/gpu/vllm/base",
+            model="not a model",
+        )
+
+
+@pytest.mark.asyncio
+async def test_render_rejects_custom_model_when_overlay_has_no_safe_patch_point(tmp_path):
+    class MissingModelRunner(FakeRunner):
+        async def __call__(self, argv, *, input=None, timeout=None):  # noqa: A002
+            if list(argv)[:2] == ["kubectl", "kustomize"]:
+                return _result(
+                    argv,
+                    stdout=yaml.safe_dump(
+                        {
+                            "apiVersion": "apps/v1",
+                            "kind": "Deployment",
+                            "metadata": {"name": "model-server"},
+                            "spec": {"template": {"metadata": {}, "spec": {"containers": []}}},
+                        }
+                    ),
+                )
+            return await super().__call__(argv, input=input, timeout=timeout)
+
+    deployer = NamespaceDeployer(_source(tmp_path), runner=MissingModelRunner())
+
+    with pytest.raises(DomainValidationError, match="safe override"):
+        await deployer.render(
+            namespace="team-a",
+            name="demo",
+            guide="optimized-baseline",
+            overlay="guides/optimized-baseline/modelserver/gpu/vllm/base",
+            model="acme/new-model",
+        )
+
+
+@pytest.mark.asyncio
 async def test_render_refuses_cluster_scoped_router_resource(tmp_path):
     deployer = NamespaceDeployer(_source(tmp_path), runner=FakeRunner(cluster_scoped_router=True))
 

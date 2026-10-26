@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+import tempfile
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -14,6 +17,7 @@ import yaml
 
 from llm_d_bench.core.exceptions import ConflictError, DomainValidationError, NotFoundError
 from llm_d_bench.utils.kubernetes_names import validate_namespace
+from llm_d_bench.utils.paths import prism_temp_root
 from llm_d_bench.utils.shell import CommandResult, run
 from llm_d_bench.versions import router_chart, router_chart_version
 
@@ -24,6 +28,7 @@ INVENTORY_PREFIX = "llmd-inventory-"
 INVENTORY_SCHEMA = "llmd.inventory/v1"
 ROUTER_RELEASE_PREFIX = "llmd-"
 _STACK_NAME = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
+_MODEL_ID_PART = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 _RETAINED_KINDS = {"PersistentVolumeClaim", "Secret"}
 CommandRunner = Callable[..., Awaitable[CommandResult]]
 
@@ -228,13 +233,14 @@ class NamespaceDeployer:
         name: str,
         guide: str,
         overlay: str,
+        model: str | None = None,
         preflight: bool = True,
     ) -> RenderedPlan:
         namespace = validate_namespace(namespace)
         name = _validate_stack_name(name)
         source_root = self._require_source()
         overlay_path, catalog_entry = self._overlay_path(guide, overlay)
-        selected_model = catalog_entry.model
+        selected_model = _deployment_model(catalog_entry, model)
         values_path = _router_values_path(source_root, guide, catalog_entry.engine)
         if values_path is None:
             raise DomainValidationError(f"Guide {guide!r} has no supported standalone router values")
@@ -244,26 +250,45 @@ class NamespaceDeployer:
 
         model_result = await self._command(["kubectl", "kustomize", str(overlay_path)])
         model_documents = _parse_documents(model_result.stdout, "Kustomize")
+        if (
+            model is not None
+            and selected_model != catalog_entry.model
+            and not _contains_string(model_documents, catalog_entry.model or "")
+        ):
+            raise DomainValidationError(
+                "the selected Guide overlay does not expose its declared model ID for a safe override"
+            )
         _bind_and_label(model_documents, namespace, name)
 
         release_name = f"{ROUTER_RELEASE_PREFIX}{name}"
-        helm_args = [
-            "template",
-            release_name,
-            router_chart(),
-            "--namespace",
-            namespace,
-            "--version",
-            router_chart_version(),
-            "--values",
-            str(base_values),
-            "--values",
-            str(values_path),
-            "--set-string",
-            _router_stack_selector(name),
-        ]
-        router_result = await self._command(["helm", *helm_args])
+        with _model_value_paths(
+            (base_values, values_path),
+            catalog_entry.model,
+            selected_model,
+        ) as (render_base_values, render_guide_values):
+            helm_args = [
+                "template",
+                release_name,
+                router_chart(),
+                "--namespace",
+                namespace,
+                "--version",
+                router_chart_version(),
+                "--values",
+                str(render_base_values),
+                "--values",
+                str(render_guide_values),
+                "--set-string",
+                _router_stack_selector(name),
+            ]
+            router_result = await self._command(["helm", *helm_args])
         router_documents = _parse_documents(router_result.stdout, "Helm")
+        if model is not None:
+            _replace_model_references(
+                [*model_documents, *router_documents],
+                catalog_entry.model,
+                selected_model,
+            )
         await self._validate_namespaced_documents([*model_documents, *router_documents], namespace)
 
         model_manifest = yaml.safe_dump_all(model_documents, sort_keys=False)
@@ -292,6 +317,7 @@ class NamespaceDeployer:
         name: str,
         guide: str,
         overlay: str,
+        model: str | None = None,
     ) -> DeploymentInventory:
         namespace = validate_namespace(namespace)
         name = _validate_stack_name(name)
@@ -301,6 +327,7 @@ class NamespaceDeployer:
             name=name,
             guide=guide,
             overlay=overlay,
+            model=model,
             preflight=True,
         )
         await self._refuse_existing_resources(namespace, [*plan.resources, *plan.retained])
@@ -314,27 +341,32 @@ class NamespaceDeployer:
         helm_installed = False
         model_apply_attempted = False
         try:
-            await self._command(
-                [
-                    "helm",
-                    "install",
-                    plan.release_name,
-                    router_chart(),
-                    "--namespace",
-                    namespace,
-                    "--version",
-                    router_chart_version(),
-                    "--values",
-                    str(base_values),
-                    "--values",
-                    str(values_path),
-                    "--set-string",
-                    _router_stack_selector(name),
-                    "--atomic",
-                    "--timeout",
-                    f"{max(1, int(self.timeout_seconds * 0.8))}s",
-                ]
-            )
+            with _model_value_paths(
+                (base_values, values_path),
+                catalog_entry.model,
+                plan.model,
+            ) as (install_base_values, install_guide_values):
+                await self._command(
+                    [
+                        "helm",
+                        "install",
+                        plan.release_name,
+                        router_chart(),
+                        "--namespace",
+                        namespace,
+                        "--version",
+                        router_chart_version(),
+                        "--values",
+                        str(install_base_values),
+                        "--values",
+                        str(install_guide_values),
+                        "--set-string",
+                        _router_stack_selector(name),
+                        "--atomic",
+                        "--timeout",
+                        f"{max(1, int(self.timeout_seconds * 0.8))}s",
+                    ]
+                )
             helm_installed = True
             model_apply_attempted = True
             await self._command(
@@ -775,6 +807,24 @@ def _validate_stack_name(value: str) -> str:
     return value
 
 
+def _deployment_model(entry: GuideOverlay, value: str | None) -> str | None:
+    if value is None:
+        return entry.model
+    model = value.strip()
+    parts = model.split("/")
+    if (
+        len(model) > 96
+        or len(parts) != 2
+        or any(not part or not _MODEL_ID_PART.fullmatch(part) for part in parts)
+        or "--" in model
+        or ".." in model
+    ):
+        raise DomainValidationError("model must be a Hugging Face model ID such as organization/model-name")
+    if not entry.model:
+        raise DomainValidationError("the selected Guide overlay does not declare a model that Lens can override")
+    return model
+
+
 def _inventory_name(name: str) -> str:
     return f"{INVENTORY_PREFIX}{name}"
 
@@ -787,6 +837,97 @@ def _parse_documents(content: str, source: str) -> list[dict[str, Any]]:
     if not documents or any(not isinstance(item, dict) for item in documents):
         raise DomainValidationError(f"{source} did not render Kubernetes objects")
     return documents
+
+
+def _replace_model_references(
+    documents: Sequence[dict[str, Any]],
+    default_model: str | None,
+    selected_model: str | None,
+) -> None:
+    if not default_model or not selected_model or default_model == selected_model:
+        return
+    default_name = default_model.rsplit("/", 1)[-1]
+    selected_name = selected_model.rsplit("/", 1)[-1]
+    replacements = ((default_model, selected_model), (default_name, selected_name))
+
+    for document in documents:
+        _replace_model_value(document, replacements, selected_name, selected_model)
+
+
+def _contains_string(value: Any, needle: str) -> bool:
+    if not needle:
+        return False
+    if isinstance(value, str):
+        return needle in value
+    if isinstance(value, list):
+        return any(_contains_string(child, needle) for child in value)
+    if isinstance(value, dict):
+        return any(_contains_string(child, needle) for child in value.values())
+    return False
+
+
+def _replace_model_value(
+    value: Any,
+    replacements: Sequence[tuple[str, str]],
+    selected_name: str,
+    selected_model: str,
+) -> Any:
+    if isinstance(value, str):
+        by_source = dict(replacements)
+        pattern = "|".join(re.escape(source) for source, _replacement in replacements)
+        return re.sub(pattern, lambda match: by_source[match.group(0)], value)
+    if isinstance(value, list):
+        for index, child in enumerate(value):
+            value[index] = _replace_model_value(child, replacements, selected_name, selected_model)
+        return value
+    if isinstance(value, dict):
+        for key, child in value.items():
+            value[key] = _replace_model_value(child, replacements, selected_name, selected_model)
+        if "llm-d.ai/model" in value:
+            value["llm-d.ai/model"] = _model_label(selected_name, selected_model)
+    return value
+
+
+@contextmanager
+def _model_value_paths(
+    paths: tuple[Path, Path],
+    default_model: str | None,
+    selected_model: str | None,
+) -> Iterator[tuple[Path, Path]]:
+    if not default_model or not selected_model or default_model == selected_model:
+        yield paths
+        return
+    default_name = default_model.rsplit("/", 1)[-1]
+    selected_name = selected_model.rsplit("/", 1)[-1]
+    replacements = ((default_model, selected_model), (default_name, selected_name))
+    scratch = prism_temp_root("llmd-model-values")
+    scratch.mkdir(parents=True, exist_ok=True, mode=0o700)
+    scratch.chmod(0o700)
+    with tempfile.TemporaryDirectory(prefix="values-", dir=scratch) as temporary:
+        rewritten = []
+        for index, path in enumerate(paths):
+            try:
+                values = yaml.safe_load(path.read_text(encoding="utf-8"))
+            except (OSError, yaml.YAMLError) as error:
+                raise DomainValidationError(f"router values {path.name!r} could not be read") from error
+            if not isinstance(values, dict):
+                raise DomainValidationError(f"router values {path.name!r} must contain a mapping")
+            _replace_model_value(values, replacements, selected_name, selected_model)
+            destination = Path(temporary) / f"{index}-{path.name}"
+            destination.write_text(yaml.safe_dump(values, sort_keys=False), encoding="utf-8")
+            destination.chmod(0o600)
+            rewritten.append(destination)
+        yield rewritten[0], rewritten[1]
+
+
+def _model_label(model_name: str, model_id: str) -> str:
+    value = re.sub(r"[^A-Za-z0-9_.-]+", "-", model_name).strip("._-")
+    if not value:
+        value = "model"
+    if len(value) <= 63:
+        return value
+    digest = hashlib.sha256(model_id.encode()).hexdigest()[:8]
+    return f"{value[:54].rstrip('._-')}-{digest}"
 
 
 def _bind_and_label(documents: Sequence[dict[str, Any]], namespace: str, name: str) -> None:
