@@ -23,7 +23,6 @@ import {
     Rocket,
     Server,
     Tag,
-    Upload,
     Waypoints,
 } from 'lucide-react';
 import { Badge, Button, Checkbox, Input, Label, Modal, Select, Textarea } from './ui';
@@ -37,6 +36,7 @@ import { createModelCacheEntry } from './ModelCache/modelCacheBackend';
 import { getGpuDriverStatus, installGpuDriver, waitForGpuDriverReady } from './ClusterMonitoringStack/gpuDriverBackend';
 import { getHardwareProfiles, acceleratorVendorsFromProfiles, accessModesForVendor } from './ClusterMonitoringStack/hardwareProfilesBackend';
 import { BootstrapNodesPanel } from './ClusterBootstrap/BootstrapNodesPanel';
+import { KubeconfigFilePicker } from './shared/KubeconfigFilePicker';
 
 const STEPS = [
     { id: 'basics', label: 'Basic Info', icon: Server },
@@ -784,12 +784,11 @@ export function CreateClusterWizard({ onClose, onCreated }) {
                             />
                         )}
                         {(kubeconfigSource === 'upload' || file) && (
-                            <div className="flex items-center gap-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2">
-                                <Upload size={15} className="shrink-0 text-slate-400 dark:text-slate-500" />
-                                <span className="flex-1 truncate text-sm text-theme-muted">{file ? file.name : 'Choose a kubeconfig file'}</span>
-                                <input type="file" onChange={(event) => setFile(event.target.files?.[0] || null)} className="hidden" id="wizard-kubeconfig-file" />
-                                <label htmlFor="wizard-kubeconfig-file" className="cursor-pointer rounded-md border border-emerald-500/40 px-2 py-1 text-xs font-medium text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10">Browse</label>
-                            </div>
+                            <KubeconfigFilePicker
+                                inputId="wizard-kubeconfig-file"
+                                file={file}
+                                onFileChange={setFile}
+                            />
                         )}
                     </div>
                 </div>

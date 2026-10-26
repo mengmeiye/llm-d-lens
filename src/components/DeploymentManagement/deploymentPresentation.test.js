@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { derivePodStatusGroup, effectiveStatusGroup, effectiveStatusLabel } from './deploymentPresentation.js';
+import {
+    derivePodStatusGroup,
+    effectiveStatusGroup,
+    effectiveStatusLabel,
+    statusGroup,
+    summarizeStatuses,
+} from './deploymentPresentation.js';
 
 const pod = (overrides = {}) => ({
     name: 'model',
@@ -43,4 +49,19 @@ test('a completed pod does not hide a genuine pod failure', () => {
 
     assert.equal(derivePodStatusGroup(pods), 'Failed');
     assert.equal(effectiveStatusLabel({ status: 'ready' }, pods), 'READY · POD ERROR');
+});
+
+test('namespace inventory states use the shared deployment summary groups', () => {
+    assert.equal(statusGroup('installed'), 'Ready');
+    assert.equal(statusGroup('degraded'), 'Failed');
+    assert.equal(statusGroup('unreachable'), 'Failed');
+    assert.equal(statusGroup('removed'), 'Cleaned');
+    assert.deepEqual(
+        summarizeStatuses([
+            { status: 'installed' },
+            { status: 'degraded' },
+            { status: 'unreachable' },
+        ]),
+        { total: 3, Ready: 1, 'In progress': 0, Failed: 2, Cleaned: 0 }
+    );
 });

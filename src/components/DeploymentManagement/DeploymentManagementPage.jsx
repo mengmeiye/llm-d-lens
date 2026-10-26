@@ -29,6 +29,7 @@ import { EditDeploymentModal } from './EditDeploymentModal';
 import { DeleteDeploymentModal } from './DeleteDeploymentModal';
 import { DeploymentPodsLogsModal } from './DeploymentPodsLogsModal';
 import { DeploymentShareDrawer } from './DeploymentShareDrawer';
+import { DeploymentSummary } from './DeploymentSummary';
 import { useAuth } from '../../features/auth/useAuth';
 import { usePolling } from '../../hooks/usePolling';
 import {
@@ -43,15 +44,6 @@ const SEARCH_DEBOUNCE_MS = 300;
 const DEPLOYMENT_REFRESH_INTERVAL_MS = 5000;
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const DEFAULT_PAGE_SIZE = 20;
-
-function StatCard({ label, value, tone = 'text-white' }) {
-    return (
-        <div className="flex h-full flex-col gap-2 rounded-xl border border-slate-700/60 bg-slate-800/60 p-4 text-left shadow-lg backdrop-blur-xl">
-            <div className="truncate text-xs font-medium text-slate-400">{label}</div>
-            <div className={`truncate text-3xl font-bold leading-none ${tone}`}>{value}</div>
-        </div>
-    );
-}
 
 export function DeploymentManagementPage({ onNavigate } = {}) {
     const [searchInput, setSearchInput] = useState('');
@@ -218,15 +210,7 @@ export function DeploymentManagementPage({ onNavigate } = {}) {
                 )}
             />
 
-            <section className="flex flex-col gap-3">
-                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-                    <StatCard label="Total" value={summary.total} />
-                    <StatCard label="Ready" value={summary.Ready} />
-                    <StatCard label="In progress" value={summary['In progress']} />
-                    <StatCard label="Failed" value={summary.Failed} tone={summary.Failed > 0 ? 'text-rose-500 font-extrabold' : 'text-white'} />
-                    <StatCard label="Cleaned" value={summary.Cleaned} />
-                </div>
-            </section>
+            <DeploymentSummary summary={summary} />
 
             <section
                 aria-busy={loading || refreshing}

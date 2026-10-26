@@ -29,6 +29,8 @@ export { ModulePage } from './ModulePage';
 export { WellLitHeader } from './WellLitHeader';
 export { ToggleGroup } from './ToggleGroup';
 export { SectionLabel } from './SectionLabel';
+export { FormError } from './FormError';
+export { DeleteConfirmation } from './DeleteConfirmation';
 export { AsyncState } from '../shared/AsyncState';
 
 export { ChartContainer } from './charts/ChartContainer';

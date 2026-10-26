@@ -60,7 +60,7 @@ function RowActions({ item, busy, connecting, onInspect, onViewPodsLogs, onEdit,
     const name = deploymentTitle(item);
     const isInProgress = statusGroup(item.status) === 'In progress';
     const localEndpoint = deploymentLocalEndpoint(item);
-    const canConnect = !localEndpoint && !item.pending && item.status === 'ready' && item.endpoint;
+    const canConnect = Boolean(onConnectLocalEndpoint) && !localEndpoint && !item.pending && item.status === 'ready' && item.endpoint;
     return (
         <div className="flex items-center justify-end gap-1">
             <>
@@ -77,7 +77,7 @@ function RowActions({ item, busy, connecting, onInspect, onViewPodsLogs, onEdit,
                         {connecting ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Link2 size={14} />}
                     </button>
                 )}
-                <button
+                {onInspect && <button
                     type="button"
                     onClick={() => onInspect(item)}
                     disabled={busy}
@@ -86,8 +86,8 @@ function RowActions({ item, busy, connecting, onInspect, onViewPodsLogs, onEdit,
                     className="rounded-lg p-1.5 text-slate-400 transition hover:bg-slate-800/70 hover:text-slate-100 disabled:opacity-40"
                 >
                     <Info size={14} />
-                </button>
-                {!item.pending && <button
+                </button>}
+                {!item.pending && onEdit && <button
                     type="button"
                     onClick={() => onEdit(item)}
                     disabled={busy}
@@ -97,7 +97,7 @@ function RowActions({ item, busy, connecting, onInspect, onViewPodsLogs, onEdit,
                 >
                     <Pencil size={14} />
                 </button>}
-                <button
+                {onViewPodsLogs && <button
                     type="button"
                     onClick={() => onViewPodsLogs?.(item)}
                     disabled={busy}
@@ -110,8 +110,8 @@ function RowActions({ item, busy, connecting, onInspect, onViewPodsLogs, onEdit,
                     }`}
                 >
                     <FileText size={14} />
-                </button>
-                {!item.pending && <DeploymentMonitoringButton deployment={item} onNavigate={onNavigate} />}
+                </button>}
+                {!item.pending && onNavigate && <DeploymentMonitoringButton deployment={item} onNavigate={onNavigate} />}
                 {!item.pending && onShare && <button
                     type="button"
                     onClick={() => onShare(item)}
@@ -122,7 +122,7 @@ function RowActions({ item, busy, connecting, onInspect, onViewPodsLogs, onEdit,
                 >
                     <Share2 size={14} />
                 </button>}
-                {!item.pending && <button
+                {!item.pending && onDelete && <button
                     type="button"
                     onClick={() => onDelete(item)}
                     disabled={busy}
@@ -199,7 +199,7 @@ function ExpandToggle({ expanded, onToggle, name }) {
     );
 }
 
-export function DeploymentTable({ items, mutatingId, connectingEndpointId = '', clusterNameById = {}, onInspect, onViewPodsLogs, onEdit, onDelete, onNavigate, onConnectLocalEndpoint, onShare }) {
+export function DeploymentTable({ items, mutatingId, connectingEndpointId = '', clusterNameById = {}, podsLoader = getDeploymentExecutionPods, onInspect, onViewPodsLogs, onEdit, onDelete, onNavigate, onConnectLocalEndpoint, onShare }) {
     const { copiedValue: copiedEndpoint, copy: copyEndpoint } = useClipboard();
     const [expandedId, setExpandedId] = useState('');
     const [podsById, setPodsById] = useState({});
@@ -208,10 +208,10 @@ export function DeploymentTable({ items, mutatingId, connectingEndpointId = '', 
     const pollTimerRef = useRef(null);
 
     const fetchPodsFor = async (executionId, silent = false) => {
-        if (!executionId) return;
+        if (!executionId || !podsLoader) return;
         if (!silent) setPodsLoadingId(executionId);
         try {
-            const data = await getDeploymentExecutionPods(executionId);
+            const data = await podsLoader(executionId);
             const list = Array.isArray(data?.pods) ? data.pods : [];
             setPodsById((current) => ({ ...current, [executionId]: list }));
             setPodsErrorById((current) => ({ ...current, [executionId]: data?.error || '' }));
@@ -234,7 +234,7 @@ export function DeploymentTable({ items, mutatingId, connectingEndpointId = '', 
     // once collapsed so we don't poll pods for every deployment on the page.
     useEffect(() => {
         if (pollTimerRef.current) clearInterval(pollTimerRef.current);
-        if (!expandedId) return undefined;
+        if (!expandedId || !podsLoader) return undefined;
         pollTimerRef.current = setInterval(() => fetchPodsFor(expandedId, true), PODS_POLL_INTERVAL_MS);
         return () => clearInterval(pollTimerRef.current);
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -272,7 +272,7 @@ export function DeploymentTable({ items, mutatingId, connectingEndpointId = '', 
                                     <td className="max-w-[260px] px-4 py-3 text-left">
                                         <div className="flex items-start gap-2">
                                             <div className="mt-0.5 flex w-8 shrink-0 items-center gap-1">
-                                                {!item.pending && (
+                                                {!item.pending && podsLoader && (
                                                     <ExpandToggle expanded={expanded} onToggle={() => toggleExpand(item.execution_id)} name={deploymentTitle(item)} />
                                                 )}
                                                 <StatusDot item={item} pods={pods} />
@@ -343,7 +343,7 @@ export function DeploymentTable({ items, mutatingId, connectingEndpointId = '', 
                             <div className="flex items-start justify-between gap-2">
                                 <div className="flex min-w-0 flex-1 items-start gap-2">
                                     <div className="mt-0.5 flex w-8 shrink-0 items-center gap-1">
-                                        {!item.pending && (
+                                        {!item.pending && podsLoader && (
                                             <ExpandToggle expanded={expanded} onToggle={() => toggleExpand(item.execution_id)} name={deploymentTitle(item)} />
                                         )}
                                         <StatusDot item={item} pods={pods} />

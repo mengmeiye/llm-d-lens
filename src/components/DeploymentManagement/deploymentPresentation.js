@@ -4,6 +4,7 @@
 
 export const STATUS_GROUPS = {
     ready: 'Ready',
+    installed: 'Ready',
     succeeded: 'Ready',
     partially_succeeded: 'Ready',
 
@@ -18,12 +19,15 @@ export const STATUS_GROUPS = {
     cancelling: 'In progress',
 
     failed: 'Failed',
+    degraded: 'Failed',
+    unreachable: 'Failed',
 
     cleaned: 'Cleaned',
     cleaned_up: 'Cleaned',
     rolled_back: 'Cleaned',
     stopped: 'Cleaned',
     cancelled: 'Cleaned',
+    removed: 'Cleaned',
 };
 
 const STATUS_TONES = {
@@ -165,7 +169,7 @@ export function deploymentLocalEndpoint(item) {
     return item?.forwarded_endpoint || '';
 }
 
-export { formatTimestamp } from '../../utils/formatTimestamp';
+export { formatTimestamp } from '../../utils/formatTimestamp.js';
 
 export function shortId(executionId) {
     return String(executionId || '').slice(-8);
@@ -206,4 +210,4 @@ export function clusterOptions(items) {
     return [...new Set(items.map((item) => item?.cluster_id).filter(Boolean))].sort();
 }
 
-export { errorMessage } from '../../utils/errorMessage';
+export { errorMessage } from '../../utils/errorMessage.js';
