@@ -17,8 +17,15 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.pool import StaticPool
 
 
+def pytest_configure(config):
+    config.addinivalue_line("markers", "no_database: test imports and exercises no database-backed services")
+
+
 @pytest.fixture(autouse=True)
-def _isolated_test_database():
+def _isolated_test_database(request):
+    if request.node.get_closest_marker("no_database"):
+        yield
+        return
     # Imported lazily so modules that register ORM models (e.g.
     # llm_d_bench.db.models.cluster) are only loaded once pytest actually
     # starts running tests.

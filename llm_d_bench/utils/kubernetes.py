@@ -16,21 +16,12 @@ from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query
 
+from llm_d_bench.utils.kubernetes_names import validate_namespace as validate_namespace
 from llm_d_bench.utils.shell import CommandResult, CommandRunner, ScopedCommandRunner, spawn, which
 
 router = APIRouter(prefix="/api/cluster", tags=["cluster"])
 
 logger = logging.getLogger(__name__)
-
-
-_NAMESPACE = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
-
-
-def validate_namespace(value: str) -> str:
-    """Validate a Kubernetes namespace without normalizing caller input."""
-    if len(value) > 63 or not _NAMESPACE.fullmatch(value):
-        raise ValueError("namespace must be a valid Kubernetes DNS label")
-    return value
 
 
 @dataclass

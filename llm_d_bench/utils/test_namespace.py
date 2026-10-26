@@ -2,6 +2,8 @@ import pytest
 
 from llm_d_bench.utils.kubernetes import validate_namespace
 
+pytestmark = pytest.mark.no_database
+
 
 @pytest.mark.parametrize("value", ["a", "0", "llm-d-monitoring", "a" * 63])
 def test_valid_namespace(value):
