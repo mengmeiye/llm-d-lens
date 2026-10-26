@@ -58,19 +58,21 @@ const VIEW_ALIASES = {
 };
 
 const SUPPORTED_VIEWS = new Set(['cluster-monitoring-stack', 'clusters', 'storage-management', 'model-cache', 'ai-providers', 'model-service', 'api-keys', 'usage', 'playground', 'optimization-deployments', 'model-market', 'optimization-evaluate', 'optimization-evaluate-new', 'optimization-evaluation-details', 'optimization-explore', 'optimization-deploy', 'optimization-workspace', 'optimization-simulate', 'optimization-simulate-details', 'opt-define', 'opt-search', 'opt-deploy', 'opt-benchmark', 'opt-performance', 'admin/users', 'admin/groups', 'admin/roles', 'admin/identity-providers', 'admin/master-key', 'admin/sessions', 'admin/audit', 'admin/model-service', 'admin/usage']);
+const LOCAL_VIEWS = new Set(['clusters', 'optimization-deployments']);
 
-function resolveView(view) {
+function resolveView(view, localMode = false) {
   const resolved = VIEW_ALIASES[view] || view;
+  if (localMode) return LOCAL_VIEWS.has(resolved) ? resolved : 'clusters';
   return SUPPORTED_VIEWS.has(resolved) ? resolved : 'model-market';
 }
 
-function AuthenticatedApp() {
+function AuthenticatedApp({ localMode = false }) {
   const { canView } = useAuth();
   const mainRef = useRef(null);
   const [currentView, setCurrentView] = useState(() => {
     const params = new URLSearchParams(window.location.search);
-    const view = params.get('view') || 'model-market';
-    return resolveView(view);
+    const view = params.get('view') || (localMode ? 'clusters' : 'model-market');
+    return resolveView(view, localMode);
   });
 
   const [navigationParams, setNavigationParams] = useState(() => {
@@ -97,34 +99,28 @@ function AuthenticatedApp() {
     return saved !== null ? saved === 'true' : true;
   });
   useEffect(() => {
-    const root = window.document.documentElement;
-    root.classList.add('dark');
-    localStorage.setItem('app-theme', 'dark');
-  }, []);
-
-  useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const requestedView = params.get('view');
     if (!requestedView) return;
-    const resolvedView = resolveView(requestedView);
+    const resolvedView = resolveView(requestedView, localMode);
     if (resolvedView === requestedView) return;
     params.set('view', resolvedView);
     window.history.replaceState({}, '', `${window.location.pathname}?${params.toString()}`);
-  }, []);
+  }, [localMode]);
 
   useEffect(() => {
     const onPopState = () => {
       const params = new URLSearchParams(window.location.search);
-      const view = params.get('view') || 'model-market';
-      setCurrentView(resolveView(view));
+      const view = params.get('view') || (localMode ? 'clusters' : 'model-market');
+      setCurrentView(resolveView(view, localMode));
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
-  }, []);
+  }, [localMode]);
 
 
   const handleNavigate = (requestedView, extraParams = {}) => {
-    const view = resolveView(requestedView);
+    const view = resolveView(requestedView, localMode);
     setCurrentView(view);
     setIsMobileNavOpen(false); // Close mobile nav on navigation
     
@@ -205,8 +201,25 @@ function AuthenticatedApp() {
                 message="You do not have permission to view this page."
               />
             </div>
+          ) : localMode ? (
+            <>
+              {currentView === 'clusters' && (
+                <OptimizationClusterOverview
+                  mode="namespace"
+                  onNavigate={handleNavigate}
+                  onToggleMobileNav={() => setIsMobileNavOpen(!isMobileNavOpen)}
+                />
+              )}
+              {currentView === 'optimization-deployments' && (
+                <DeploymentManagementPage
+                  onNavigate={handleNavigate}
+                  onToggleMobileNav={() => setIsMobileNavOpen(!isMobileNavOpen)}
+                  mode="namespace"
+                />
+              )}
+            </>
           ) : (
-          <WorkflowProvider>
+            <WorkflowProvider>
             {currentView === 'cluster-monitoring-stack' && <ClusterMonitoringStackDashboard onNavigateBack={() => handleNavigate('home')} onToggleMobileNav={() => setIsMobileNavOpen(!isMobileNavOpen)} initialClusterId={navigationParams.clusterId} initialProfileDeployment={navigationParams.profileDeployment} />}
             {currentView === 'clusters' && <OptimizationClusterOverview onNavigate={handleNavigate} onNavigateBack={() => handleNavigate('home')} onToggleMobileNav={() => setIsMobileNavOpen(!isMobileNavOpen)} />}
             {currentView === 'storage-management' && <StorageManagementPage onNavigate={handleNavigate} />}
@@ -238,7 +251,7 @@ function AuthenticatedApp() {
             {currentView === 'admin/audit' && <AuditLogsPage onToggleMobileNav={() => setIsMobileNavOpen(!isMobileNavOpen)} />}
             {currentView === 'admin/model-service' && <ModelServiceAdminPage onToggleMobileNav={() => setIsMobileNavOpen(!isMobileNavOpen)} />}
             {currentView === 'admin/usage' && <ModelUsagePage mode="admin" onToggleMobileNav={() => setIsMobileNavOpen(!isMobileNavOpen)} />}
-          </WorkflowProvider>
+            </WorkflowProvider>
           )}
 
         </main>
@@ -246,7 +259,7 @@ function AuthenticatedApp() {
   );
 }
 
-function AuthGate() {
+function AuthGate({ localMode = false }) {
   const { status, principal } = useAuth();
   if (status === 'loading') {
     return <LoadingState fullPage label="Checking your session" />;
@@ -257,14 +270,20 @@ function AuthGate() {
   if (principal?.mustChangePassword) {
     return <ChangePasswordPage />;
   }
-  return <AuthenticatedApp />;
+  return <AuthenticatedApp localMode={localMode} />;
 }
 
 export default function App() {
+  const localMode = Boolean(window.__LLMD_LOCAL_MODE__) || import.meta.env.VITE_LLMD_LOCAL_MODE === 'true';
+  useEffect(() => {
+    const root = window.document.documentElement;
+    root.classList.add('dark');
+    localStorage.setItem('app-theme', 'dark');
+  }, []);
   return (
     <ErrorBoundary>
-      <AuthProvider>
-        <AuthGate />
+      <AuthProvider sessionMode={localMode ? 'local' : 'hosted'}>
+        <AuthGate localMode={localMode} />
       </AuthProvider>
     </ErrorBoundary>
   );

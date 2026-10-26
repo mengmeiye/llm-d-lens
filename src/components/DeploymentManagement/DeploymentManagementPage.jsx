@@ -30,6 +30,7 @@ import { DeleteDeploymentModal } from './DeleteDeploymentModal';
 import { DeploymentPodsLogsModal } from './DeploymentPodsLogsModal';
 import { DeploymentShareDrawer } from './DeploymentShareDrawer';
 import { DeploymentSummary } from './DeploymentSummary';
+import { NamespaceDeploymentView } from './NamespaceDeploymentView';
 import { useAuth } from '../../features/auth/useAuth';
 import { usePolling } from '../../hooks/usePolling';
 import {
@@ -45,7 +46,14 @@ const DEPLOYMENT_REFRESH_INTERVAL_MS = 5000;
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const DEFAULT_PAGE_SIZE = 20;
 
-export function DeploymentManagementPage({ onNavigate } = {}) {
+export function DeploymentManagementPage({ onNavigate, onToggleMobileNav, mode = 'hosted' } = {}) {
+    if (mode === 'namespace') {
+        return <NamespaceDeploymentView onNavigate={onNavigate} onToggleMobileNav={onToggleMobileNav} />;
+    }
+    return <HostedDeploymentManagementPage onNavigate={onNavigate} />;
+}
+
+function HostedDeploymentManagementPage({ onNavigate } = {}) {
     const [searchInput, setSearchInput] = useState('');
     const query = useDebouncedValue(searchInput, SEARCH_DEBOUNCE_MS).trim();
     const [statuses, setStatuses] = useState(new Set());

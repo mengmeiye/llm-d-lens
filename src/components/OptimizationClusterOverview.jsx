@@ -11,6 +11,7 @@ import { getClusterDeploymentMonitoring, manageDeploymentMonitoring } from './Cl
 import { getClusterStackLinks } from './ClusterMonitoringStack/clusterMonitoringStackBackend';
 import { connectDeploymentExecution } from './OptimizationWorkspace/remoteDeployBackend';
 import { storePendingModelMarketCluster } from '../features/modelMarket/transfer';
+import { NamespaceClusterOverview } from './NamespaceClusterOverview';
 
 const CENTRAL_NAMESPACE = 'llm-d-monitoring';
 const GRAFANA_PERFORMANCE_DASHBOARD = '/d/llm-d-performance/llm-d-performance-dashboard';
@@ -288,7 +289,12 @@ function deploymentChip(status) {
     }
 }
 
-export default function OptimizationClusterOverview({ onNavigate, onToggleMobileNav }) {
+export default function OptimizationClusterOverview({ mode = 'hosted', ...props }) {
+    if (mode === 'namespace') return <NamespaceClusterOverview {...props} />;
+    return <HostedClusterOverview {...props} />;
+}
+
+function HostedClusterOverview({ onNavigate, onToggleMobileNav }) {
     const [clusters, setClusters] = useState([]);
     const [selectedId, setSelectedId] = useState('');
     const [overview, setOverview] = useState(null);
