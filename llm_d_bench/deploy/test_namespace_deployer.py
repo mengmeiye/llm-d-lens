@@ -225,6 +225,111 @@ support:
     assert entry.variant_label == "Kubernetes (base)"
 
 
+@pytest.mark.asyncio
+async def test_capabilities_detect_registered_accelerator_and_platform(tmp_path):
+    class CapabilityRunner(FakeRunner):
+        async def __call__(self, argv, *, input=None, timeout=None):  # noqa: A002
+            command = list(argv)
+            self.commands.append(command)
+            self.inputs.append(input)
+            if command[:2] == ["kubectl", "version"]:
+                return _result(argv, stdout=json.dumps({"serverVersion": {"gitVersion": "v1.34.1-gke.1"}}))
+            if command[:3] == ["kubectl", "get", "nodes"]:
+                return _result(
+                    argv,
+                    stdout=json.dumps(
+                        {
+                            "items": [
+                                {
+                                    "metadata": {
+                                        "labels": {
+                                            "feature.node.kubernetes.io/pci-10de.present": "true",
+                                            "cloud.google.com/gke-nodepool": "workers",
+                                        }
+                                    },
+                                    "status": {"capacity": {"nvidia.com/gpu": "8"}},
+                                }
+                            ]
+                        }
+                    ),
+                )
+            if command[:3] == ["kubectl", "get", "resourceslices.resource.k8s.io"]:
+                return _result(argv, stdout=json.dumps({"items": []}))
+            if command[:3] == ["kubectl", "api-resources", "--api-group=config.openshift.io"]:
+                return _result(argv)
+            return await super().__call__(argv, input=input, timeout=timeout)
+
+    capabilities = await NamespaceDeployer(_source(tmp_path), runner=CapabilityRunner()).capabilities()
+
+    assert capabilities.accelerators == ("gpu",)
+    assert capabilities.accelerator_status == "detected"
+    assert capabilities.platform == "gke"
+    assert capabilities.platform_label == "Google Kubernetes Engine"
+    assert capabilities.recommended_profile == "gke"
+
+
+@pytest.mark.asyncio
+async def test_capabilities_map_openshift_to_the_upstream_base_profile(tmp_path):
+    class OpenShiftRunner(FakeRunner):
+        async def __call__(self, argv, *, input=None, timeout=None):  # noqa: A002
+            command = list(argv)
+            self.commands.append(command)
+            self.inputs.append(input)
+            if command[:2] == ["kubectl", "version"]:
+                return _result(argv, stdout=json.dumps({"serverVersion": {"gitVersion": "v1.34.1"}}))
+            if command[:3] in (
+                ["kubectl", "get", "nodes"],
+                ["kubectl", "get", "resourceslices.resource.k8s.io"],
+            ):
+                return _result(argv, stdout=json.dumps({"items": []}))
+            if command[:3] == ["kubectl", "api-resources", "--api-group=config.openshift.io"]:
+                return _result(argv, stdout="clusterversions config.openshift.io false ClusterVersion\n")
+            return await super().__call__(argv, input=input, timeout=timeout)
+
+    capabilities = await NamespaceDeployer(_source(tmp_path), runner=OpenShiftRunner()).capabilities()
+
+    assert capabilities.platform == "openshift"
+    assert capabilities.platform_label == "Red Hat OpenShift"
+    assert capabilities.recommended_profile == "base"
+
+
+@pytest.mark.asyncio
+async def test_capabilities_keep_multiple_registered_accelerators_manual(tmp_path):
+    class MultipleRunner(FakeRunner):
+        async def __call__(self, argv, *, input=None, timeout=None):  # noqa: A002
+            command = list(argv)
+            self.commands.append(command)
+            self.inputs.append(input)
+            if command[:2] == ["kubectl", "version"]:
+                return _result(argv, stdout=json.dumps({"serverVersion": {"gitVersion": "v1.34.1"}}))
+            if command[:3] == ["kubectl", "get", "nodes"]:
+                return _result(argv, stdout=json.dumps({"items": [{"status": {"capacity": {"nvidia.com/gpu": "8"}}}]}))
+            if command[:3] == ["kubectl", "get", "resourceslices.resource.k8s.io"]:
+                return _result(argv, stdout=json.dumps({"items": [{"spec": {"driver": "gpu.intel.com"}}]}))
+            if command[:3] == ["kubectl", "api-resources", "--api-group=config.openshift.io"]:
+                return _result(argv)
+            return await super().__call__(argv, input=input, timeout=timeout)
+
+    capabilities = await NamespaceDeployer(_source(tmp_path), runner=MultipleRunner()).capabilities()
+
+    assert capabilities.accelerators == ("gpu", "xpu")
+    assert capabilities.accelerator_status == "multiple"
+    assert capabilities.accelerator_reason == (
+        "Multiple registered accelerator types were detected; choose one manually."
+    )
+
+
+@pytest.mark.asyncio
+async def test_capabilities_degrade_when_kubectl_is_unavailable(tmp_path):
+    async def unavailable_runner(argv, *, input=None, timeout=None):  # noqa: A002, ARG001
+        raise FileNotFoundError("kubectl is unavailable")
+
+    capabilities = await NamespaceDeployer(_source(tmp_path), runner=unavailable_runner).capabilities()
+
+    assert capabilities.accelerator_status == "unavailable"
+    assert capabilities.platform_status == "unavailable"
+
+
 def test_catalog_keeps_undeclared_guide_overlay_disabled(tmp_path):
     source = _source(tmp_path)
     (source / "guides" / "optimized-baseline" / "guide.yaml").write_text("name: optimized-baseline\n", encoding="utf-8")

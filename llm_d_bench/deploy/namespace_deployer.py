@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -16,6 +17,8 @@ from typing import Any
 import yaml
 
 from llm_d_bench.core.exceptions import ConflictError, DomainValidationError, NotFoundError
+from llm_d_bench.hardware.models import HardwareProfile
+from llm_d_bench.hardware.resolver import resolve_by_device_class, resolve_by_node_label, resolve_by_resource
 from llm_d_bench.utils.kubernetes_names import validate_namespace
 from llm_d_bench.utils.paths import prism_temp_root
 from llm_d_bench.utils.shell import CommandResult, run
@@ -111,6 +114,32 @@ class DeploymentInventory:
             "sourceRevision": self.source_revision,
             "resources": [_identity_payload(item) for item in self.resources],
             "retainedResources": [_identity_payload(item) for item in self.retained],
+        }
+
+
+@dataclass(frozen=True)
+class ClusterCapabilities:
+    """Non-sensitive, advisory capabilities for one local Kubernetes connection."""
+
+    accelerators: tuple[str, ...]
+    accelerator_status: str
+    accelerator_reason: str | None
+    platform: str | None
+    platform_label: str | None
+    platform_status: str
+    platform_reason: str | None
+    recommended_profile: str | None
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "accelerators": list(self.accelerators),
+            "acceleratorStatus": self.accelerator_status,
+            "acceleratorReason": self.accelerator_reason,
+            "platform": self.platform,
+            "platformLabel": self.platform_label,
+            "platformStatus": self.platform_status,
+            "platformReason": self.platform_reason,
+            "recommendedProfile": self.recommended_profile,
         }
 
 
@@ -225,6 +254,52 @@ class NamespaceDeployer:
 
     def catalog(self) -> list[GuideOverlay]:
         return discover_guide_overlays(self._require_source())
+
+    async def capabilities(self) -> ClusterCapabilities:
+        """Best-effort accelerator and platform hints for the selected context.
+
+        These probes are advisory because namespace operators commonly cannot
+        list Nodes or ResourceSlices. A failed or ambiguous probe never changes
+        the deployer's namespace-scoped lifecycle contract.
+        """
+
+        version, nodes, resource_slices, openshift_resources = await asyncio.gather(
+            self._probe(["kubectl", "version", "--output=json"]),
+            self._probe(["kubectl", "get", "nodes", "--output=json"]),
+            self._probe(
+                ["kubectl", "get", "resourceslices.resource.k8s.io", "--output=json"],
+            ),
+            self._probe(
+                ["kubectl", "api-resources", "--api-group=config.openshift.io", "--no-headers"],
+            ),
+        )
+        node_items = _command_items(nodes)
+        resource_slice_items = _command_items(resource_slices)
+        profiles = _detected_hardware_profiles(node_items, resource_slice_items)
+        accelerators = tuple(sorted({profile.upstream_variant for profile in profiles if profile.upstream_variant}))
+        accelerator_status, accelerator_reason = _accelerator_detection_status(
+            accelerators,
+            nodes,
+            resource_slices,
+            node_items is not None,
+            resource_slice_items is not None,
+        )
+        platform, platform_status, platform_reason = _detected_platform(
+            version,
+            node_items,
+            openshift_resources,
+        )
+        platform_label, recommended_profile = _platform_presentation(platform)
+        return ClusterCapabilities(
+            accelerators=accelerators,
+            accelerator_status=accelerator_status,
+            accelerator_reason=accelerator_reason,
+            platform=platform,
+            platform_label=platform_label,
+            platform_status=platform_status,
+            platform_reason=platform_reason,
+            recommended_profile=recommended_profile,
+        )
 
     async def render(
         self,
@@ -707,6 +782,14 @@ class NamespaceDeployer:
             raise DeploymentCommandError(_command_detail(result, f"{Path(argv[0]).name} command failed"))
         return result
 
+    async def _probe(self, argv: list[str]) -> CommandResult:
+        """Run one optional read probe without making detection a prerequisite."""
+
+        try:
+            return await self._command(argv, check=False, timeout_seconds=10)
+        except (OSError, TimeoutError):
+            return CommandResult(tuple(self._connection_arguments(argv)), 1, "", "probe unavailable")
+
     def _connection_arguments(self, argv: list[str]) -> list[str]:
         if not argv:
             return argv
@@ -783,6 +866,123 @@ def _overlay_variant_label(support_entry: Any, variant: str, engine: str) -> str
             prefix = variant[: -len(suffix)]
             return f"{_metadata_label(None, prefix)} · {label}"
     return _metadata_label(None, variant)
+
+
+def _command_items(result: CommandResult) -> list[dict[str, Any]] | None:
+    if result.returncode:
+        return None
+    try:
+        payload = json.loads(result.stdout)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+        return None
+    return items
+
+
+def _detected_hardware_profiles(
+    nodes: list[dict[str, Any]] | None,
+    resource_slices: list[dict[str, Any]] | None,
+) -> tuple[HardwareProfile, ...]:
+    profiles: dict[str, HardwareProfile] = {}
+    for node in nodes or []:
+        metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+        labels = metadata.get("labels") if isinstance(metadata.get("labels"), dict) else {}
+        profile = resolve_by_node_label({str(key): str(value) for key, value in labels.items()})
+        if profile:
+            profiles[profile.id] = profile
+        status = node.get("status") if isinstance(node.get("status"), dict) else {}
+        for field_name in ("capacity", "allocatable"):
+            resources = status.get(field_name) if isinstance(status.get(field_name), dict) else {}
+            for resource_name in resources:
+                profile = resolve_by_resource(str(resource_name))
+                if profile:
+                    profiles[profile.id] = profile
+    for resource_slice in resource_slices or []:
+        spec = resource_slice.get("spec") if isinstance(resource_slice.get("spec"), dict) else {}
+        profile = resolve_by_device_class(str(spec.get("driver") or ""))
+        if profile:
+            profiles[profile.id] = profile
+    return tuple(profiles.values())
+
+
+def _permission_denied(result: CommandResult) -> bool:
+    detail = f"{result.stdout}\n{result.stderr}".lower()
+    return any(marker in detail for marker in ("forbidden", "unauthorized", "permission denied"))
+
+
+def _accelerator_detection_status(
+    accelerators: tuple[str, ...],
+    nodes: CommandResult,
+    resource_slices: CommandResult,
+    nodes_readable: bool,
+    resource_slices_readable: bool,
+) -> tuple[str, str | None]:
+    if len(accelerators) == 1:
+        return "detected", None
+    if len(accelerators) > 1:
+        return "multiple", "Multiple registered accelerator types were detected; choose one manually."
+    if nodes_readable or resource_slices_readable:
+        return "not-detected", "No registered accelerator type was detected; choose one manually."
+    if _permission_denied(nodes) or _permission_denied(resource_slices):
+        return (
+            "permission-limited",
+            "Accelerator detection needs read access to Nodes or ResourceSlices; choose one manually.",
+        )
+    return "unavailable", "Accelerator detection is unavailable; choose one manually."
+
+
+def _detected_platform(
+    version: CommandResult,
+    nodes: list[dict[str, Any]] | None,
+    openshift_resources: CommandResult,
+) -> tuple[str | None, str, str | None]:
+    detected: set[str] = set()
+    if openshift_resources.returncode == 0 and openshift_resources.stdout.strip():
+        detected.add("openshift")
+    for node in nodes or []:
+        metadata = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+        labels = metadata.get("labels") if isinstance(metadata.get("labels"), dict) else {}
+        label_names = {str(key) for key in labels}
+        spec = node.get("spec") if isinstance(node.get("spec"), dict) else {}
+        provider_id = str(spec.get("providerID") or "").lower()
+        if any(name.startswith("cloud.google.com/gke-") for name in label_names):
+            detected.add("gke")
+        if any(name.startswith("eks.amazonaws.com/") for name in label_names) or provider_id.startswith("aws://"):
+            detected.add("aws")
+        if any(name.startswith(("machine.openshift.io/", "node.openshift.io/")) for name in label_names):
+            detected.add("openshift")
+    if version.returncode == 0:
+        try:
+            payload = json.loads(version.stdout)
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        server = payload.get("serverVersion") if isinstance(payload, dict) else {}
+        git_version = str(server.get("gitVersion") or "").lower() if isinstance(server, dict) else ""
+        if "gke" in git_version:
+            detected.add("gke")
+        if "eks" in git_version:
+            detected.add("aws")
+    if len(detected) == 1:
+        return next(iter(detected)), "detected", None
+    if len(detected) > 1:
+        return None, "multiple", "Multiple cluster platform signals were detected; choose a profile manually."
+    if version.returncode == 0:
+        return "kubernetes", "detected", None
+    if _permission_denied(openshift_resources):
+        return None, "permission-limited", "Platform detection is permission-limited; choose a profile manually."
+    return None, "unavailable", "Platform detection is unavailable; choose a profile manually."
+
+
+def _platform_presentation(platform: str | None) -> tuple[str | None, str | None]:
+    values = {
+        "aws": ("Amazon EKS", "aws"),
+        "gke": ("Google Kubernetes Engine", "gke"),
+        "kubernetes": ("Kubernetes", "base"),
+        "openshift": ("Red Hat OpenShift", "base"),
+    }
+    return values.get(platform, (None, None))
 
 
 def _overlay_coordinates(parts: tuple[str, ...], engines: set[str]) -> tuple[str, str, str]:
