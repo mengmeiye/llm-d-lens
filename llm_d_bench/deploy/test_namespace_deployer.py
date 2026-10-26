@@ -9,6 +9,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 from llm_d_bench.core.exceptions import ConflictError, DomainValidationError
+from llm_d_bench.deploy.cli import main as cli_main
 from llm_d_bench.deploy.local_api import create_local_app
 from llm_d_bench.deploy.namespace_deployer import (
     DEPLOYMENT_LABEL,
@@ -854,3 +855,91 @@ def test_local_app_rejects_non_loopback_host_header(tmp_path):
 
     assert response.status_code == 400
     assert response.text == "Invalid host header"
+
+
+def test_cli_deploy_uses_shared_namespace_deployer(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("LENS_SCRATCH_DIR", str(tmp_path / "scratch"))
+    runner = FakeRunner()
+    deployer = NamespaceDeployer(_source(tmp_path), runner=runner)
+    monkeypatch.setattr("llm_d_bench.deploy.cli._deployer", lambda _args: deployer)
+
+    result = cli_main(
+        [
+            "deploy",
+            "--namespace",
+            "team-a",
+            "--name",
+            "demo",
+            "--guide",
+            "optimized-baseline",
+            "--overlay",
+            "guides/optimized-baseline/modelserver/gpu/vllm/base",
+            "--model",
+            "acme/new-model",
+            "--output",
+            "json",
+        ]
+    )
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "installed"
+    assert payload["model"] == "acme/new-model"
+    assert any(command[:2] == ["helm", "install"] for command in runner.commands)
+
+
+def test_cli_catalog_defaults_to_deployable_overlays_and_all_explains_exclusions(tmp_path, capsys):
+    source = _source(tmp_path)
+    component = source / "guides" / "optimized-baseline" / "modelserver" / "gpu" / "vllm" / "components" / "shared"
+    component.mkdir(parents=True)
+    (component / "kustomization.yaml").write_text("resources: []\n", encoding="utf-8")
+
+    assert cli_main(["catalog", "--source", str(source)]) == 0
+    default_output = capsys.readouterr().out
+    assert "DEPLOYER SUPPORT\tUPSTREAM MATURITY\tREASON" in default_output
+    assert "gpu/vllm/base\tsupported\tvalidated\t-" in default_output
+    assert "components/shared" not in default_output
+
+    assert cli_main(["catalog", "--source", str(source), "--all"]) == 0
+    all_output = capsys.readouterr().out
+    assert (
+        "gpu/vllm/components/shared\tunsupported\tvalidated\toverlay is an internal Kustomize component" in all_output
+    )
+
+    assert cli_main(["catalog", "--source", str(source), "--output", "json"]) == 0
+    default_json = json.loads(capsys.readouterr().out)
+    assert len(default_json) == 1
+    assert default_json[0]["supported"] is True
+
+    assert cli_main(["catalog", "--source", str(source), "--all", "--output", "json"]) == 0
+    all_json = json.loads(capsys.readouterr().out)
+    assert len(all_json) == 2
+    excluded = next(item for item in all_json if not item["supported"])
+    assert excluded["reason"] == "overlay is an internal Kustomize component"
+
+
+def test_cli_list_prints_stack_inventories_not_catalog_rows(tmp_path, monkeypatch, capsys):
+    runner = FakeRunner()
+    deployer = NamespaceDeployer(_source(tmp_path), runner=runner)
+    monkeypatch.setattr("llm_d_bench.deploy.cli._deployer", lambda _args: deployer)
+    deploy = ["deploy", "--namespace", "team-a", "--name", "demo", "--guide", "optimized-baseline"]
+    assert cli_main([*deploy, "--overlay", "guides/optimized-baseline/modelserver/gpu/vllm/base"]) == 0
+    capsys.readouterr()
+    runner.commands.clear()
+
+    async def list_inventories(argv, *, input=None, timeout=None):  # noqa: A002
+        if list(argv)[:3] == ["kubectl", "get", "configmaps"]:
+            return _result(argv, stdout=json.dumps({"items": [runner.inventory]}))
+        return await FakeRunner.__call__(runner, argv, input=input, timeout=timeout)
+
+    deployer._runner = list_inventories
+
+    assert cli_main(["list", "--namespace", "team-a"]) == 0
+    assert capsys.readouterr().out == "team-a/demo\tinstalled\n"
+
+
+def test_local_ui_refuses_non_loopback_bind(tmp_path, capsys):
+    result = cli_main(["ui", "--source", str(_source(tmp_path)), "--host", "0.0.0.0"])  # noqa: S104
+
+    assert result == 2
+    assert "must bind to a loopback address" in capsys.readouterr().err

@@ -64,6 +64,9 @@ ldap = [
     "ldap3>=2.9",
 ]
 
+[project.scripts]
+llmd = "llm_d_bench.deploy.cli:main"
+
 # Hardware plugin discovery (see docs/design/hardware-plugin-architecture.md).
 # Built-ins declare the same entry points as third-party packages; they are
 # loaded through one discovery path in llm_d_bench.hardware.discovery.
