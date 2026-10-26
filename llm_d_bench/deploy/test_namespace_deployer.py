@@ -15,6 +15,7 @@ from llm_d_bench.deploy.namespace_deployer import (
     DEPLOYMENT_LABEL,
     DeploymentCommandError,
     NamespaceDeployer,
+    _bind_and_label,
     discover_guide_overlays,
 )
 from llm_d_bench.utils.shell import CommandResult
@@ -1095,6 +1096,32 @@ def test_catalog_rejects_guide_step_that_changes_the_namespace_outside_kubectl_a
     assert entries["gpu"].reason == (
         "guide.yaml step deploy.storage changes the cluster with a command this deployer cannot follow"
     )
+
+
+def test_render_labels_leader_worker_set_leader_pod_template(tmp_path):
+    documents = [
+        {
+            "apiVersion": "leaderworkerset.x-k8s.io/v1",
+            "kind": "LeaderWorkerSet",
+            "metadata": {"name": "decode"},
+            "spec": {
+                "leaderWorkerTemplate": {
+                    "leaderTemplate": {"metadata": {"labels": {"role": "leader"}}, "spec": {"containers": []}},
+                    "workerTemplate": {"spec": {"containers": []}},
+                }
+            },
+        }
+    ]
+
+    _bind_and_label(documents, "team-a", "demo")
+
+    template = documents[0]["spec"]["leaderWorkerTemplate"]
+    assert template["leaderTemplate"]["metadata"]["labels"] == {
+        "role": "leader",
+        "app.kubernetes.io/managed-by": "llmd",
+        DEPLOYMENT_LABEL: "demo",
+    }
+    assert template["workerTemplate"]["metadata"]["labels"][DEPLOYMENT_LABEL] == "demo"
 
 
 def test_cli_list_prints_stack_inventories_not_catalog_rows(tmp_path, monkeypatch, capsys):

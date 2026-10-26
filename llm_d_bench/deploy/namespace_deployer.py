@@ -42,6 +42,7 @@ ROUTER_RELEASE_PREFIX = "llmd-"
 _STACK_NAME = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
 _MODEL_ID_PART = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 _RETAINED_KINDS = {"PersistentVolumeClaim", "Secret"}
+_POD_TEMPLATE_KEYS = {"leaderTemplate", "template", "workerTemplate"}
 # Router /metrics authentication renders a ClusterRole for TokenReview and
 # SubjectAccessReview, which a namespace operator cannot create.
 _NAMESPACED_ROUTER_FLAGS = ("--set", "router.monitoring.prometheus.auth.enabled=false")
@@ -1203,11 +1204,7 @@ def _label_embedded_templates(value: Any, labels: Mapping[str, str]) -> None:
     if not isinstance(value, dict):
         return
     for key, child in value.items():
-        if (
-            key in {"leaderWorkerTemplate", "template", "workerTemplate"}
-            and isinstance(child, dict)
-            and isinstance(child.get("spec"), dict)
-        ):
+        if key in _POD_TEMPLATE_KEYS and isinstance(child, dict) and isinstance(child.get("spec"), dict):
             metadata = child.setdefault("metadata", {})
             if not isinstance(metadata, dict) or not isinstance(metadata.get("labels", {}), dict):
                 raise DomainValidationError("rendered workload template metadata labels must be a mapping")
