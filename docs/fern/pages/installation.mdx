@@ -54,6 +54,62 @@ prompt non-interactively.
 To upgrade an existing installation instead of a fresh install, see
 [Upgrade](/upgrade).
 
+## Install the lightweight local deployer
+
+Use this path when you only need the database-free local UI or `llmd` CLI for
+an existing namespace. It does not start PostgreSQL, the hosted authentication
+service, or the multi-user Lens backend.
+
+Before installing, make sure you have:
+
+- Python 3.11 or newer;
+- `kubectl` and Helm on `PATH`;
+- a local checkout of the llm-d repository;
+- a working kubeconfig context; and
+- permission to manage the Guide's namespaced resources, inventory ConfigMaps,
+  and Helm release Secrets in the target namespace. The router creates a Role
+  and RoleBinding, so you also need the read access that Role grants (Pods,
+  InferencePools, InferenceObjectives, and InferenceModelRewrites).
+
+A namespaced RoleBinding to the built-in `admin` ClusterRole is usually enough
+once a cluster administrator aggregates rules for the Guide's custom resources,
+such as InferencePool, into it. Required CRDs, operators, accelerator support,
+Gateway components, storage classes, referenced Secrets (for example the
+`llm-d-hf-token` Secret most Guides read), and platform security policy must
+already exist. The local deployer never creates a namespace or installs
+cluster-scoped prerequisites.
+
+Install the CLI from a Lens source checkout:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -e .
+llmd --help
+```
+
+CLI-only use does not require Node. To use the browser UI, build it once with
+Node and npm, then start the loopback-only server:
+
+```bash
+npm install
+npm run build
+llmd ui --source /path/to/llm-d
+```
+
+Open `http://127.0.0.1:8000`. The local process uses the current kubeconfig
+context by default; pass `--kubeconfig PATH` and `--context NAME` at startup to
+select another startup connection. You can also open **Clusters** in the
+browser to import one or more kubeconfigs and select any declared context.
+Browser imports use process-owned `0600` temporary files so `kubectl` and Helm
+can read them; Lens never stores the uploads in a database and removes them when
+`llmd ui` exits. The browser opens the normal Lens shell directly as a local
+namespace operator; there is no credential screen, and the navigation contains
+only **Clusters** and **Deployments**. Continue with the
+[namespace-scoped quickstart](/quickstart#deploy-in-an-existing-namespace-without-admin-access),
+the [Deployments user guide](/user-guide/deployments), or the
+[CLI Reference](/cli-reference).
+
 ## Develop from source
 
 To work on the code instead of running an installed deployment:

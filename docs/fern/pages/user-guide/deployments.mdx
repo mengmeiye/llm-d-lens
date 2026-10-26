@@ -5,7 +5,83 @@ description: Plan, approve and execute inference deployments across clusters.
 
 Use the **Deployments** page to find active services, inspect their runtime details, and manage the deployment records you already created. Every action below is based on controls that exist in the current frontend.
 
-The deployment list cancels superseded filter requests so older results cannot replace the current selection. Cluster names are shown when available, with IDs as a fallback. Deletion still requires the displayed confirmation phrase and preserves the namespace choice; while deletion is pending, submission and dialog dismissal are disabled.
+## Use the local namespace-scoped entrance
+
+Users who already have a kubeconfig and permission in an existing namespace can
+run a smaller, database-free entrance:
+
+```bash
+llmd ui --source /path/to/llm-d
+```
+
+The server listens on `127.0.0.1:8000` by default. Build the frontend with
+`npm run build` before starting it from a source checkout. The browser reuses
+the normal Lens shell and its **Clusters** and **Deployments** navigation. It
+enters directly as an implicit local namespace operator, without a credential
+screen, and hides every unrelated or administrative navigation item.
+
+1. Open **Clusters**. Keep the ambient or startup connection, or click
+   **Browse**, choose a kubeconfig, and click **Import kubeconfig**. You may
+   import multiple files for the current process.
+2. Choose the target context and click **Deploy to this cluster**. A kubeconfig
+   import never registers a hosted cluster: Lens writes a `0600`
+   process-temporary file for `kubectl` and Helm, never stores it in a database,
+   and removes it when `llmd ui` exits.
+3. On **Deployments**, enter the existing **Namespace** and a unique
+   **Deployment name** in the visible **Deploy a stack** panel.
+4. Choose a **Serving architecture**, **Accelerator**, **Inference engine**, and
+   **Deployment profile**. Each choice narrows the next one, and only deployable
+   catalog entries are offered. TensorRT-LLM appears when the selected Guide
+   declares `trtllm` for that architecture and accelerator; Lens does not
+   hardcode engine eligibility.
+5. Review the prefilled **Hugging Face model** or enter another
+   `organization/model-name`. Catalog model IDs remain available as browser
+   suggestions. A custom model changes model references, but does not retune
+   resources or engine arguments that are specific to the Guide default. Lens
+   rejects the override if the rendered overlay has no safe model-ID patch point.
+6. Lens makes a best-effort accelerator and cluster-platform recommendation.
+   It auto-selects only an unambiguous choice available for the selected
+   architecture. You can always override the recommendation.
+7. Click **Render and preflight**. Lens renders the Kustomize overlay, any
+   other namespaced manifests the Guide's `guide.yaml` applies with it, and the
+   router chart with the Guide's values. It rejects cluster-scoped or
+   cross-namespace objects and asks the API server to dry-run the plan.
+8. Review the resource list, then click **Deploy stack**.
+9. The deployment appears in the same responsive deployment table and summary
+   cards used by hosted Lens.
+10. To remove it later, click the row's delete action and confirm **Teardown**.
+
+Accelerator discovery may read cluster-scoped Nodes or ResourceSlices. Namespace
+operators are often not allowed to list them, and clusters can contain several
+accelerator families. In those cases Lens reports that detection is unavailable
+or ambiguous and leaves the selector manual. Platform detection similarly
+degrades to a manual deployment profile. Detection is never a deployment
+prerequisite and returns no node details, kubeconfig paths, or credentials.
+
+Upstream Guides currently do not publish a separate OpenShift deployment
+overlay. When Lens detects OpenShift, it recommends the existing `base` overlay
+and labels it **OpenShift (Kubernetes base overlay)**. This is a presentation of
+the authoritative base overlay, not a synthetic OpenShift manifest. Server-side
+preflight still enforces the namespace's existing permissions and security
+policy; an administrator must provide compatible SCC and cluster prerequisites
+ahead of time.
+
+Teardown uses the stack's namespaced inventory. It does not delete the namespace,
+PVCs, Secrets, cluster-scoped prerequisites, or unrecorded resources. Models use
+the Guide's runtime download behavior; local model caching, hostPath, and NFS are
+not required. The Guide default model is the safest choice. A custom Hugging Face
+model must fit the selected engine, accelerator capacity, parser flags, and Guide
+tuning. Required CRDs, drivers, Gateway components, platform security
+policy, referenced Secrets, and referenced PVCs must already be available.
+Router metrics are served without authentication, because authenticated
+metrics need a ClusterRole that a namespace operator cannot create. Overlays
+whose Guide steps need a shell pipeline, such as `envsubst | kubectl apply`,
+appear as unsupported with that reason.
+
+The local deployment list polls quietly while preserving the namespace and any
+open create or teardown interaction. The shared table omits hosted-only actions
+such as sharing, metadata editing, pod logs, monitoring, and port forwarding.
+While teardown is pending, submission and dialog dismissal are disabled.
 
 When specifying an operator preference for deployment planning, use English, such as
 `prefer prefix cache`, `more GPU for performance`, or `use fewer GPU resources`.

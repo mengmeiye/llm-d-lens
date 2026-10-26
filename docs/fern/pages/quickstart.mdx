@@ -3,12 +3,82 @@ title: Quickstart
 description: The fastest way to see Lens running.
 ---
 
-The fastest path to a running Lens instance is the bundled installer — no
-manual Node/Python/Postgres setup required.
+Choose the lightweight namespace path when you already have cluster access, or
+the full installation path when you need the multi-user control plane.
+
+## Deploy in an existing namespace without admin access
+
+Complete the [lightweight local installation](/installation#install-the-lightweight-local-deployer)
+first. The commands below use your current kubeconfig context and never create
+or delete the namespace.
+
+Discover the Guide and overlay values available in your llm-d checkout:
 
 ```bash
-git clone https://github.com/intel-sandbox/llm-d-prism.git
-cd llm-d-prism
+llmd catalog --source /path/to/llm-d
+```
+
+The default catalog contains only deployable entries. Use `--all` when you need
+to inspect excluded internal or unsupported overlays and their reasons.
+
+Use values printed by `catalog` to render and preflight a stack before changing
+the namespace:
+
+```bash
+llmd render \
+  --source /path/to/llm-d \
+  --namespace my-namespace \
+  --name demo \
+  --guide GUIDE_FROM_CATALOG \
+  --overlay OVERLAY_FROM_CATALOG
+```
+
+If the preflight is correct, run the same selection with `deploy`, inspect it,
+and remove it when finished:
+
+```bash
+llmd deploy \
+  --source /path/to/llm-d \
+  --namespace my-namespace \
+  --name demo \
+  --guide GUIDE_FROM_CATALOG \
+  --overlay OVERLAY_FROM_CATALOG
+
+llmd status --namespace my-namespace --name demo
+llmd teardown --namespace my-namespace --name demo
+```
+
+Add `--model ORGANIZATION/MODEL_NAME` to `render` and `deploy` to override the
+Guide default. The model must remain compatible with the selected engine,
+accelerator capacity, and Guide tuning.
+
+For the browser workflow, run `llmd ui --source /path/to/llm-d`, open
+`http://127.0.0.1:8000`, and Lens opens its normal application shell directly
+with **Clusters** and **Deployments** available. On **Clusters**, keep the
+ambient connection or import one or more kubeconfigs, then select the target
+context. Imported files are temporary and database-free. Click **Deploy to this
+cluster**, enter the existing namespace and stack name in the visible **Deploy a
+stack** panel, then choose a serving architecture, accelerator, inference engine,
+deployment profile, and Hugging Face model. Lens suggests the detected
+accelerator and platform profile when the result is unambiguous; every choice
+remains manually editable. On OpenShift, Lens presents the upstream Kubernetes
+base overlay as the OpenShift choice because the Guide catalog has no separate
+OpenShift overlay.
+Render, deploy, or teardown from the shared deployment page.
+
+Teardown deletes only the stack's recorded namespaced objects. It retains the
+namespace, PVCs, Secrets, and unrecorded resources. See the
+[Deployments user guide](/user-guide/deployments) for the complete privilege
+and prerequisite boundaries.
+
+## Install the full multi-user control plane
+
+The fastest path to a full Lens instance is the bundled installer — no manual
+Node, Python, or PostgreSQL setup is required.
+
+```bash
+git clone https://github.com/llm-d-incubation/llm-d-lens.git
+cd llm-d-lens
 ./scripts/LensInstaller-Ubuntu-x86_64.sh
 ```
 

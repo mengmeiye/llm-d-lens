@@ -5,6 +5,30 @@ description: Discover, bootstrap and manage Kubernetes clusters.
 
 Use the Clusters workflow to register kubeconfig-backed clusters, bootstrap new clusters, review cluster health, and reach the deployments running on each cluster.
 
+## Use Clusters in the database-free local UI
+
+When Lens is started with `llmd ui`, **Clusters** keeps the familiar navigation
+position but exposes only namespace-operator connection actions. It does not
+load the hosted cluster registry or offer bootstrap, node maintenance,
+monitoring installation, or other cluster-admin operations.
+
+1. Open **Clusters**. The ambient context, or the kubeconfig/context passed to
+   `llmd ui`, is available immediately.
+2. To add another connection, click **Browse**, choose a kubeconfig, and click
+   **Import kubeconfig**. Every declared context appears as a cluster target.
+3. Click **Select cluster** to make a context active, or click **Deploy to this
+   cluster** to select it and continue directly to **Deployments**.
+4. Use **Remove import** to forget an uploaded kubeconfig from the current local
+   session. This does not modify or delete anything in the Kubernetes cluster.
+
+Local imports are written as `0600` files under Lens scratch storage, are never
+stored in a database, and are removed when `llmd ui` exits. Multiple imports are
+kept only in the running process. The UI returns context names and display
+labels, never kubeconfig contents or server-side paths.
+
+The remaining sections describe the hosted, database-backed Clusters workflow
+for administrators and maintainers.
+
 ## Register a cluster from a kubeconfig
 
 1. Open **Clusters** and click **Add**.

@@ -3,6 +3,57 @@ title: CLI Reference
 description: Command-line tools for running, installing and managing Lens.
 ---
 
+## `llmd` (namespace-scoped deployment)
+
+`llmd` and the local Lens entrance use the same database-free deployment
+service. They read official Guide Kustomize overlays from a local llm-d checkout,
+use the current kubeconfig context by default, and operate only in a designated
+existing namespace. When a Guide's `guide.yaml` declares its deploy steps,
+`llmd` follows them for the selected overlay: the same router chart version and
+values files, and any extra namespaced manifests such as a render pool. It
+never runs Guide shell commands. The router's `/metrics` authentication is
+turned off because it needs a ClusterRole.
+
+| Command | Purpose |
+| --- | --- |
+| `llmd catalog --source PATH [--all]` | List deployable model-server overlays. Add `--all` to include excluded overlays and their rejection reasons. |
+| `llmd render --source PATH --namespace NS --name NAME --guide GUIDE --overlay PATH [--model HF_ID]` | Render, enforce namespace scope, and run server dry-run without mutation. |
+| `llmd deploy --source PATH --namespace NS --name NAME --guide GUIDE --overlay PATH [--model HF_ID]` | Install the standalone router and apply the selected model-server overlay. |
+| `llmd list --namespace NS` | List stack inventory ConfigMaps in the namespace. |
+| `llmd status --namespace NS --name NAME` | Check the exact resources recorded for a stack. |
+| `llmd teardown --namespace NS --name NAME` | Uninstall the router and delete exact recorded objects, retaining PVCs and Secrets. |
+| `llmd ui --source PATH` | Serve the database-free local UX on `127.0.0.1:8000`. |
+
+Use `--kubeconfig PATH` and `--context NAME` when the ambient context is not the
+target. These inputs remain with the local process and are not copied into Lens
+storage. `--output json` is available for automation; `render` also supports
+`--output yaml`.
+
+Without `--model`, render and deploy use the model declared by the selected
+Guide overlay. `--model organization/model-name` replaces that model ID in the
+rendered model-server resources and temporary Helm values. It does not retune
+Guide resource sizing, topology, model-specific parsers, or engine flags, so the
+caller must choose a model compatible with the selected catalog entry. Render
+fails if the overlay does not expose its declared model ID for a safe override.
+
+In `llmd ui`, the **Clusters** page can add one or more imported kubeconfigs and
+switch among their contexts. Each upload is materialized only as a restricted
+process-temporary file required by `kubectl` and Helm. It is never stored in the
+database or persistent Lens data, and it is deleted when the local server exits.
+
+Catalog text keeps Lens deployer support separate from upstream maturity. By
+default it shows only entries that `render` and `deploy` accept. `--all` adds
+internal Kustomize bases/components and entries missing required support or
+standalone-router metadata, with a reason for each exclusion. In JSON output,
+`supported` and `reason` are the authoritative deployer fields.
+
+`llmd ui` refuses non-loopback binds and HTTP `Host` headers because this mode
+does not provide multi-user authentication. It never creates or deletes a
+namespace, CRD, StorageClass, cluster role, SCC, GatewayClass, or another
+cluster-scoped prerequisite. It reuses the Lens shell and the existing
+**Clusters** and **Deployments** navigation flow, enters directly as an implicit
+local namespace operator, and hides every other navigation item.
+
 ## `scripts/dev.sh` (local development)
 
 | Command | Purpose |

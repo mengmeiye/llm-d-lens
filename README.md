@@ -40,6 +40,44 @@ Lens manages these areas from one console:
 - **Lens Assistant** — an in-product assistant over the Lens API
 - **Administration** — manage users, groups, roles, identity providers and API keys
 
+### Lightweight namespace deployment
+
+If you only need to deploy and remove llm-d stacks in an existing namespace,
+Lens also provides a database-free local UI and the `llmd` CLI. Both use your
+current kubeconfig context, discover official Guide overlays from a local llm-d
+checkout, and refuse cluster-scoped or cross-namespace resources.
+The local UI reuses the normal Lens application shell and its **Clusters** and
+**Deployments** workflow, but enters directly as an implicit local namespace
+operator and hides every unrelated or administrative view. Import kubeconfigs
+and select a context on **Clusters**, then deploy into an existing namespace on
+**Deployments**. The deployment form narrows the Guide catalog through serving
+architecture, accelerator, inference engine, and deployment profile choices.
+Accelerator and platform detection is best-effort and always allows manual
+selection. Imports are held in restricted temporary files for the local process
+and are never written to a database.
+
+From a Lens source checkout:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -e .
+
+# Build the browser UI; CLI-only users can skip these two commands.
+npm install
+npm run build
+
+llmd catalog --source /path/to/llm-d
+llmd ui --source /path/to/llm-d
+```
+
+The local server listens on `http://127.0.0.1:8000`. It does not create a
+namespace or install cluster-wide prerequisites. See
+[Installation](https://llm-d-lens.docs.buildwithfern.com/installation#install-the-lightweight-local-deployer),
+the [Deployments user guide](https://llm-d-lens.docs.buildwithfern.com/user-guide/deployments),
+and the [CLI Reference](https://llm-d-lens.docs.buildwithfern.com/cli-reference)
+for prerequisites, `llmd deploy`, and `llmd teardown`.
+
 ## Getting Started
 
 The fastest path to a running Lens instance is the bundled Ubuntu installer. It provisions Node, Python, an embedded PostgreSQL database, TLS and the application, so no manual setup is required:
