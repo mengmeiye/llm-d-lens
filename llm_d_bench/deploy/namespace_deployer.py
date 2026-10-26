@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from llm_d_bench.core.exceptions import DomainValidationError
+from llm_d_bench.core.exceptions import ConflictError, DomainValidationError, NotFoundError
 from llm_d_bench.utils.kubernetes_names import validate_namespace
 from llm_d_bench.utils.shell import CommandResult, run
 from llm_d_bench.versions import router_chart, router_chart_version
@@ -19,6 +20,8 @@ from llm_d_bench.versions import router_chart, router_chart_version
 MANAGED_BY_LABEL = "app.kubernetes.io/managed-by"
 DEPLOYMENT_LABEL = "llm-d.ai/deployment"
 MANAGED_BY_VALUE = "llmd"
+INVENTORY_PREFIX = "llmd-inventory-"
+INVENTORY_SCHEMA = "llmd.inventory/v1"
 ROUTER_RELEASE_PREFIX = "llmd-"
 _STACK_NAME = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
 _RETAINED_KINDS = {"PersistentVolumeClaim", "Secret"}
@@ -74,6 +77,33 @@ class RenderedPlan:
             "overlay": self.overlay,
             "model": self.model,
             "releaseName": self.release_name,
+            "resources": [_identity_payload(item) for item in self.resources],
+            "retainedResources": [_identity_payload(item) for item in self.retained],
+        }
+
+
+@dataclass(frozen=True)
+class DeploymentInventory:
+    namespace: str
+    name: str
+    guide: str
+    overlay: str
+    model: str | None
+    release_name: str
+    source_revision: str | None
+    resources: tuple[ResourceIdentity, ...]
+    retained: tuple[ResourceIdentity, ...] = ()
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "schemaVersion": INVENTORY_SCHEMA,
+            "namespace": self.namespace,
+            "name": self.name,
+            "guide": self.guide,
+            "overlay": self.overlay,
+            "model": self.model,
+            "releaseName": self.release_name,
+            "sourceRevision": self.source_revision,
             "resources": [_identity_payload(item) for item in self.resources],
             "retainedResources": [_identity_payload(item) for item in self.retained],
         }
@@ -255,6 +285,173 @@ class NamespaceDeployer:
             await self._server_dry_run(namespace, model_manifest, router_manifest)
         return plan
 
+    async def deploy(
+        self,
+        *,
+        namespace: str,
+        name: str,
+        guide: str,
+        overlay: str,
+    ) -> DeploymentInventory:
+        namespace = validate_namespace(namespace)
+        name = _validate_stack_name(name)
+        await self._refuse_existing_inventory(namespace, name)
+        plan = await self.render(
+            namespace=namespace,
+            name=name,
+            guide=guide,
+            overlay=overlay,
+            preflight=True,
+        )
+        await self._refuse_existing_resources(namespace, [*plan.resources, *plan.retained])
+        await self._refuse_existing_release(namespace, plan.release_name)
+        source_root = self._require_source()
+        _, catalog_entry = self._overlay_path(guide, plan.overlay)
+        values_path = _router_values_path(source_root, guide, catalog_entry.engine)
+        if values_path is None:  # The render path already rejects this; retain a defensive domain boundary.
+            raise DomainValidationError(f"Guide {guide!r} has no supported standalone router values")
+        base_values = source_root / "guides" / "recipes" / "router" / "base.values.yaml"
+        helm_installed = False
+        model_apply_attempted = False
+        try:
+            await self._command(
+                [
+                    "helm",
+                    "install",
+                    plan.release_name,
+                    router_chart(),
+                    "--namespace",
+                    namespace,
+                    "--version",
+                    router_chart_version(),
+                    "--values",
+                    str(base_values),
+                    "--values",
+                    str(values_path),
+                    "--set-string",
+                    _router_stack_selector(name),
+                    "--atomic",
+                    "--timeout",
+                    f"{max(1, int(self.timeout_seconds * 0.8))}s",
+                ]
+            )
+            helm_installed = True
+            model_apply_attempted = True
+            await self._command(
+                ["kubectl", "apply", "--namespace", namespace, "--filename=-"], stdin=plan.model_manifest
+            )
+            inventory = DeploymentInventory(
+                namespace=namespace,
+                name=name,
+                guide=guide,
+                overlay=plan.overlay,
+                model=plan.model,
+                release_name=plan.release_name,
+                source_revision=await self._source_revision(),
+                resources=plan.resources,
+                retained=plan.retained,
+            )
+            await self._command(
+                ["kubectl", "apply", "--namespace", namespace, "--filename=-"],
+                stdin=_inventory_manifest(inventory),
+            )
+            return inventory
+        except Exception:
+            if model_apply_attempted:
+                owned = await self._owned_resources(namespace, name, plan.resources, check=False)
+                await self._delete_resources(namespace, owned, check=False)
+            if helm_installed:
+                await self._command(["helm", "uninstall", plan.release_name, "--namespace", namespace], check=False)
+            raise
+
+    async def list(self, namespace: str) -> list[dict[str, Any]]:  # noqa: A003 - domain operation name
+        namespace = validate_namespace(namespace)
+        result = await self._command(
+            [
+                "kubectl",
+                "get",
+                "configmaps",
+                "--namespace",
+                namespace,
+                "--selector",
+                f"{MANAGED_BY_LABEL}={MANAGED_BY_VALUE}",
+                "--output=json",
+            ]
+        )
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            raise DeploymentCommandError("Kubernetes returned an invalid ConfigMap list") from error
+        inventories = []
+        for item in payload.get("items", []):
+            try:
+                inventory = _inventory_from_configmap(item)
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            inventories.append({**inventory.payload(), "status": "installed"})
+        return sorted(inventories, key=lambda item: item["name"])
+
+    async def status(self, namespace: str, name: str) -> dict[str, Any]:
+        inventory = await self._load_inventory(namespace, name)
+        resources = []
+        missing = 0
+        for identity in inventory.resources:
+            result = await self._command(
+                [
+                    "kubectl",
+                    "get",
+                    _kubectl_identity(identity),
+                    "--namespace",
+                    inventory.namespace,
+                    "--output=name",
+                ],
+                check=False,
+            )
+            present = result.returncode == 0
+            if not present and "notfound" not in (result.stderr + result.stdout).replace(" ", "").lower():
+                raise DeploymentCommandError(
+                    _command_detail(result, f"Unable to inspect {identity.kind}/{identity.name}")
+                )
+            missing += 0 if present else 1
+            resources.append({**_identity_payload(identity), "present": present})
+        release_present, release_status = await self._release_status(inventory.namespace, inventory.release_name)
+        return {
+            **inventory.payload(),
+            "status": "installed" if missing == 0 and release_status == "deployed" else "degraded",
+            "resources": resources,
+            "missingResources": missing,
+            "releasePresent": release_present,
+            "releaseStatus": release_status,
+        }
+
+    async def teardown(self, namespace: str, name: str) -> dict[str, Any]:
+        inventory = await self._load_inventory(namespace, name)
+        await self._validate_namespaced_identities(inventory.resources)
+        owned = await self._owned_resources(inventory.namespace, inventory.name, inventory.resources, check=True)
+        helm = await self._command(
+            ["helm", "uninstall", inventory.release_name, "--namespace", inventory.namespace], check=False
+        )
+        if helm.returncode and "not found" not in (helm.stderr + helm.stdout).lower():
+            raise DeploymentCommandError(_command_detail(helm, "Helm uninstall failed"))
+        await self._delete_resources(inventory.namespace, owned, check=True)
+        await self._command(
+            [
+                "kubectl",
+                "delete",
+                "configmap",
+                _inventory_name(inventory.name),
+                "--namespace",
+                inventory.namespace,
+                "--ignore-not-found=true",
+            ]
+        )
+        return {
+            "namespace": inventory.namespace,
+            "name": inventory.name,
+            "status": "removed",
+            "retainedResources": [_identity_payload(item) for item in inventory.retained],
+        }
+
     def _overlay_path(self, guide: str, overlay: str) -> tuple[Path, GuideOverlay]:
         if not re.fullmatch(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?", guide):
             raise DomainValidationError("guide must be a valid Guide directory name")
@@ -295,6 +492,20 @@ class NamespaceDeployer:
                     f"rendered {kind}/{name} targets namespace {explicit_namespace!r}, not {namespace!r}"
                 )
 
+    async def _validate_namespaced_identities(self, resources: Sequence[ResourceIdentity]) -> None:
+        scope = await self._api_resource_scopes()
+        for identity in resources:
+            key = (identity.api_version, identity.kind)
+            if key not in scope:
+                raise DomainValidationError(
+                    f"cluster no longer serves inventoried {identity.api_version} {identity.kind}; refusing teardown"
+                )
+            if not scope[key]:
+                raise DomainValidationError(
+                    f"inventory contains cluster-scoped {identity.api_version} "
+                    f"{identity.kind}/{identity.name}; refusing teardown"
+                )
+
     async def _api_resource_scopes(self) -> dict[tuple[str, str], bool]:
         discovery = await self._command(["kubectl", "api-resources", "--output=wide"])
         return _parse_api_resource_scopes(discovery.stdout)
@@ -304,6 +515,146 @@ class NamespaceDeployer:
             ["kubectl", "apply", "--dry-run=server", "--namespace", namespace, "--filename=-"],
             stdin=f"{router_manifest}\n---\n{model_manifest}",
         )
+
+    async def _refuse_existing_inventory(self, namespace: str, name: str) -> None:
+        result = await self._command(
+            ["kubectl", "get", "configmap", _inventory_name(name), "--namespace", namespace, "--output=json"],
+            check=False,
+        )
+        if result.returncode == 0:
+            raise ConflictError(f"deployment {name!r} already has an inventory in namespace {namespace!r}")
+        if "notfound" not in (result.stderr + result.stdout).replace(" ", "").lower():
+            raise DeploymentCommandError(_command_detail(result, "Unable to check the deployment inventory"))
+
+    async def _load_inventory(self, namespace: str, name: str) -> DeploymentInventory:
+        namespace = validate_namespace(namespace)
+        name = _validate_stack_name(name)
+        result = await self._command(
+            ["kubectl", "get", "configmap", _inventory_name(name), "--namespace", namespace, "--output=json"],
+            check=False,
+        )
+        if result.returncode:
+            if "notfound" in (result.stderr + result.stdout).replace(" ", "").lower():
+                raise NotFoundError(f"deployment inventory {name!r} was not found in namespace {namespace!r}")
+            raise DeploymentCommandError(_command_detail(result, "Unable to read the deployment inventory"))
+        try:
+            inventory = _inventory_from_configmap(json.loads(result.stdout))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise DomainValidationError(f"deployment inventory {name!r} is malformed; refusing teardown") from error
+        if inventory.namespace != namespace or inventory.name != name:
+            raise DomainValidationError("deployment inventory identity does not match the requested deployment")
+        return inventory
+
+    async def _refuse_existing_resources(self, namespace: str, resources: Sequence[ResourceIdentity]) -> None:
+        for identity in resources:
+            result = await self._command(
+                ["kubectl", "get", _kubectl_identity(identity), "--namespace", namespace, "--output=name"],
+                check=False,
+            )
+            if result.returncode == 0:
+                raise ConflictError(
+                    f"rendered {identity.kind}/{identity.name} already exists in namespace {namespace!r}"
+                )
+            if "notfound" not in (result.stderr + result.stdout).replace(" ", "").lower():
+                raise DeploymentCommandError(
+                    _command_detail(result, f"Unable to check {identity.kind}/{identity.name}")
+                )
+
+    async def _refuse_existing_release(self, namespace: str, release_name: str) -> None:
+        result = await self._command(
+            ["helm", "status", release_name, "--namespace", namespace, "--output=json"],
+            check=False,
+        )
+        if result.returncode == 0:
+            raise ConflictError(f"Helm release {release_name!r} already exists in namespace {namespace!r}")
+        detail = (result.stderr + result.stdout).lower()
+        if "release: not found" not in detail and "release not found" not in detail:
+            raise DeploymentCommandError(_command_detail(result, "Unable to check the Helm release"))
+
+    async def _release_status(self, namespace: str, release_name: str) -> tuple[bool, str | None]:
+        result = await self._command(
+            ["helm", "status", release_name, "--namespace", namespace, "--output=json"],
+            check=False,
+        )
+        if result.returncode:
+            detail = (result.stderr + result.stdout).lower()
+            if "release: not found" in detail or "release not found" in detail:
+                return False, None
+            raise DeploymentCommandError(_command_detail(result, "Unable to inspect the Helm release"))
+        try:
+            payload = json.loads(result.stdout)
+            info = payload.get("info") if isinstance(payload, dict) else None
+            status = info.get("status") if isinstance(info, dict) else None
+        except json.JSONDecodeError as error:
+            raise DeploymentCommandError("Helm returned invalid release status") from error
+        if not isinstance(status, str) or not status:
+            raise DeploymentCommandError("Helm returned incomplete release status")
+        return True, status
+
+    async def _delete_resources(self, namespace: str, resources: Sequence[ResourceIdentity], *, check: bool) -> None:
+        for identity in reversed(resources):
+            await self._command(
+                [
+                    "kubectl",
+                    "delete",
+                    _kubectl_identity(identity),
+                    "--namespace",
+                    namespace,
+                    "--ignore-not-found=true",
+                ],
+                check=check,
+            )
+
+    async def _owned_resources(
+        self,
+        namespace: str,
+        name: str,
+        resources: Sequence[ResourceIdentity],
+        *,
+        check: bool,
+    ) -> list[ResourceIdentity]:
+        owned = []
+        for identity in resources:
+            result = await self._command(
+                ["kubectl", "get", _kubectl_identity(identity), "--namespace", namespace, "--output=json"],
+                check=False,
+            )
+            if result.returncode:
+                if "notfound" in (result.stderr + result.stdout).replace(" ", "").lower():
+                    continue
+                if check:
+                    raise DeploymentCommandError(
+                        _command_detail(result, f"Unable to verify {identity.kind}/{identity.name} ownership")
+                    )
+                continue
+            try:
+                document = json.loads(result.stdout)
+                metadata = document.get("metadata") if isinstance(document, dict) else None
+                labels = metadata.get("labels") if isinstance(metadata, dict) else None
+            except json.JSONDecodeError as error:
+                if check:
+                    raise DeploymentCommandError(
+                        f"Kubernetes returned invalid ownership data for {identity.kind}/{identity.name}"
+                    ) from error
+                continue
+            expected = {
+                MANAGED_BY_LABEL: MANAGED_BY_VALUE,
+                DEPLOYMENT_LABEL: name,
+            }
+            if not isinstance(labels, dict) or any(labels.get(key) != value for key, value in expected.items()):
+                if check:
+                    raise ConflictError(
+                        f"{identity.kind}/{identity.name} no longer carries deployment {name!r} ownership labels"
+                    )
+                continue
+            owned.append(identity)
+        return owned
+
+    async def _source_revision(self) -> str | None:
+        source_root = self._require_source()
+        result = await self._command(["git", "-C", str(source_root), "rev-parse", "HEAD"], check=False)
+        revision = result.stdout.strip()
+        return revision if result.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", revision) else None
 
     def _require_source(self) -> Path:
         if self.source_root is None:
@@ -424,6 +775,10 @@ def _validate_stack_name(value: str) -> str:
     return value
 
 
+def _inventory_name(name: str) -> str:
+    return f"{INVENTORY_PREFIX}{name}"
+
+
 def _parse_documents(content: str, source: str) -> list[dict[str, Any]]:
     try:
         documents = [item for item in yaml.safe_load_all(content) if item is not None]
@@ -518,6 +873,69 @@ def _resource_inventory(
 
 def _identity_payload(identity: ResourceIdentity) -> dict[str, str]:
     return {"apiVersion": identity.api_version, "kind": identity.kind, "name": identity.name}
+
+
+def _identity_from_payload(payload: Mapping[str, Any]) -> ResourceIdentity:
+    identity = ResourceIdentity(
+        api_version=str(payload["apiVersion"]), kind=str(payload["kind"]), name=str(payload["name"])
+    )
+    if not all(asdict(identity).values()):
+        raise ValueError("resource identity is incomplete")
+    return identity
+
+
+def _kubectl_identity(identity: ResourceIdentity) -> str:
+    _, separator, _ = identity.api_version.partition("/")
+    group = identity.api_version.split("/", 1)[0] if separator else ""
+    kind = identity.kind.lower()
+    resource = f"{kind}.{group}" if group else kind
+    return f"{resource}/{identity.name}"
+
+
+def _inventory_manifest(inventory: DeploymentInventory) -> str:
+    payload = json.dumps(inventory.payload(), sort_keys=True, separators=(",", ":"))
+    document = {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": _inventory_name(inventory.name),
+            "namespace": inventory.namespace,
+            "labels": {MANAGED_BY_LABEL: MANAGED_BY_VALUE, DEPLOYMENT_LABEL: inventory.name},
+        },
+        "data": {"inventory.json": payload},
+    }
+    return yaml.safe_dump(document, sort_keys=False)
+
+
+def _inventory_from_configmap(document: Mapping[str, Any]) -> DeploymentInventory:
+    metadata = document["metadata"]
+    raw = document["data"]["inventory.json"]
+    payload = json.loads(raw)
+    if payload.get("schemaVersion") != INVENTORY_SCHEMA:
+        raise ValueError("unsupported inventory schema")
+    inventory = DeploymentInventory(
+        namespace=str(payload["namespace"]),
+        name=str(payload["name"]),
+        guide=str(payload["guide"]),
+        overlay=str(payload["overlay"]),
+        model=str(payload["model"]) if payload.get("model") else None,
+        release_name=str(payload["releaseName"]),
+        source_revision=str(payload["sourceRevision"]) if payload.get("sourceRevision") else None,
+        resources=tuple(_identity_from_payload(item) for item in payload["resources"]),
+        retained=tuple(_identity_from_payload(item) for item in payload.get("retainedResources", [])),
+    )
+    if metadata.get("name") != _inventory_name(inventory.name) or metadata.get("namespace") not in (
+        None,
+        inventory.namespace,
+    ):
+        raise ValueError("inventory ConfigMap identity does not match its payload")
+    labels = metadata.get("labels") if isinstance(metadata, dict) else None
+    expected_labels = {MANAGED_BY_LABEL: MANAGED_BY_VALUE, DEPLOYMENT_LABEL: inventory.name}
+    if not isinstance(labels, dict) or any(labels.get(key) != value for key, value in expected_labels.items()):
+        raise ValueError("inventory ConfigMap does not carry its stack ownership labels")
+    if inventory.release_name != f"{ROUTER_RELEASE_PREFIX}{inventory.name}":
+        raise ValueError("inventory Helm release does not match its stack name")
+    return inventory
 
 
 def _command_detail(result: CommandResult, fallback: str) -> str:

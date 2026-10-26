@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from llm_d_bench.core.exceptions import DomainValidationError
+from llm_d_bench.core.exceptions import ConflictError, DomainValidationError
 from llm_d_bench.deploy.namespace_deployer import (
     DEPLOYMENT_LABEL,
     DeploymentCommandError,
@@ -308,6 +308,132 @@ async def test_render_refuses_cluster_scoped_router_resource(tmp_path):
             guide="optimized-baseline",
             overlay="guides/optimized-baseline/modelserver/gpu/vllm/base",
         )
+
+
+@pytest.mark.asyncio
+async def test_deploy_and_teardown_delete_exact_owned_resources_only(tmp_path):
+    runner = FakeRunner()
+    deployer = NamespaceDeployer(_source(tmp_path), runner=runner)
+    inventory = await deployer.deploy(
+        namespace="team-a",
+        name="demo",
+        guide="optimized-baseline",
+        overlay="guides/optimized-baseline/modelserver/gpu/vllm/base",
+    )
+
+    assert inventory.source_revision == "a" * 40
+    assert [item.kind for item in inventory.retained] == ["PersistentVolumeClaim"]
+    assert any("--atomic" in command for command in runner.commands if command[:2] == ["helm", "install"])
+    result = await deployer.teardown("team-a", "demo")
+
+    assert result["status"] == "removed"
+    delete_commands = [command for command in runner.commands if command[:2] == ["kubectl", "delete"]]
+    assert any("deployment.apps/model-server" in command for command in delete_commands)
+    assert not any("persistentvolumeclaim/model-weights" in command for command in delete_commands)
+    assert not any(len(command) > 2 and command[2] == "namespace" for command in delete_commands)
+
+
+@pytest.mark.asyncio
+async def test_status_reports_missing_router_release_as_degraded(tmp_path):
+    runner = FakeRunner()
+    deployer = NamespaceDeployer(_source(tmp_path), runner=runner)
+    await deployer.deploy(
+        namespace="team-a",
+        name="demo",
+        guide="optimized-baseline",
+        overlay="guides/optimized-baseline/modelserver/gpu/vllm/base",
+    )
+    runner.release_installed = False
+
+    status = await deployer.status("team-a", "demo")
+
+    assert status["status"] == "degraded"
+    assert status["missingResources"] == 0
+    assert status["releasePresent"] is False
+    assert status["releaseStatus"] is None
+
+
+@pytest.mark.asyncio
+async def test_deploy_refuses_to_adopt_an_existing_rendered_resource(tmp_path):
+    class ExistingResourceRunner(FakeRunner):
+        async def __call__(self, argv, *, input=None, timeout=None):  # noqa: A002
+            if "deployment.apps/model-server" in argv and "get" in argv:
+                return _result(argv, stdout="deployment.apps/model-server\n")
+            return await super().__call__(argv, input=input, timeout=timeout)
+
+    runner = ExistingResourceRunner()
+    deployer = NamespaceDeployer(_source(tmp_path), runner=runner)
+
+    with pytest.raises(ConflictError, match="Deployment/model-server already exists"):
+        await deployer.deploy(
+            namespace="team-a",
+            name="demo",
+            guide="optimized-baseline",
+            overlay="guides/optimized-baseline/modelserver/gpu/vllm/base",
+        )
+
+    assert not any(command[:2] == ["helm", "install"] for command in runner.commands)
+
+
+@pytest.mark.asyncio
+async def test_deploy_refuses_to_adopt_an_existing_helm_release(tmp_path):
+    class ExistingReleaseRunner(FakeRunner):
+        async def __call__(self, argv, *, input=None, timeout=None):  # noqa: A002
+            if list(argv)[:2] == ["helm", "status"]:
+                return _result(argv, stdout=json.dumps({"name": "llmd-demo"}))
+            return await super().__call__(argv, input=input, timeout=timeout)
+
+    runner = ExistingReleaseRunner()
+    deployer = NamespaceDeployer(_source(tmp_path), runner=runner)
+
+    with pytest.raises(ConflictError, match="Helm release 'llmd-demo' already exists"):
+        await deployer.deploy(
+            namespace="team-a",
+            name="demo",
+            guide="optimized-baseline",
+            overlay="guides/optimized-baseline/modelserver/gpu/vllm/base",
+        )
+
+    assert not any(command[:2] == ["helm", "install"] for command in runner.commands)
+
+
+@pytest.mark.asyncio
+async def test_teardown_refuses_resource_without_stack_ownership_labels(tmp_path):
+    runner = FakeRunner()
+    deployer = NamespaceDeployer(_source(tmp_path), runner=runner)
+    await deployer.deploy(
+        namespace="team-a",
+        name="demo",
+        guide="optimized-baseline",
+        overlay="guides/optimized-baseline/modelserver/gpu/vllm/base",
+    )
+    runner.resources["deployment.apps/model-server"]["metadata"]["labels"].pop(DEPLOYMENT_LABEL)
+
+    with pytest.raises(ConflictError, match="no longer carries deployment 'demo' ownership labels"):
+        await deployer.teardown("team-a", "demo")
+
+    assert not any(command[:2] == ["helm", "uninstall"] for command in runner.commands)
+
+
+@pytest.mark.asyncio
+async def test_teardown_refuses_cluster_scoped_identity_in_tampered_inventory(tmp_path):
+    runner = FakeRunner()
+    deployer = NamespaceDeployer(_source(tmp_path), runner=runner)
+    await deployer.deploy(
+        namespace="team-a",
+        name="demo",
+        guide="optimized-baseline",
+        overlay="guides/optimized-baseline/modelserver/gpu/vllm/base",
+    )
+    payload = json.loads(runner.inventory["data"]["inventory.json"])
+    payload["resources"] = [{"apiVersion": "v1", "kind": "Namespace", "name": "team-a"}]
+    runner.inventory["data"]["inventory.json"] = json.dumps(payload)
+
+    with pytest.raises(DomainValidationError, match="inventory contains cluster-scoped v1 Namespace/team-a"):
+        await deployer.teardown("team-a", "demo")
+
+    assert not any(command[:2] == ["helm", "uninstall"] for command in runner.commands)
+    assert not any(command[:2] == ["kubectl", "delete"] for command in runner.commands)
 
 
 @pytest.mark.asyncio
