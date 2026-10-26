@@ -17,6 +17,14 @@ from typing import Any
 import yaml
 
 from llm_d_bench.core.exceptions import ConflictError, DomainValidationError, NotFoundError
+from llm_d_bench.deploy.guide_steps import (
+    GuideManifest,
+    GuideSteps,
+    GuideStepsError,
+    declares_modelserver_steps,
+    load_guide_document,
+    resolve_guide_steps,
+)
 from llm_d_bench.hardware.models import HardwareProfile
 from llm_d_bench.hardware.resolver import resolve_by_device_class, resolve_by_node_label, resolve_by_resource
 from llm_d_bench.utils.kubernetes_names import validate_namespace
@@ -30,9 +38,14 @@ MANAGED_BY_VALUE = "llmd"
 INVENTORY_PREFIX = "llmd-inventory-"
 INVENTORY_SCHEMA = "llmd.inventory/v1"
 ROUTER_RELEASE_PREFIX = "llmd-"
+
 _STACK_NAME = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
 _MODEL_ID_PART = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 _RETAINED_KINDS = {"PersistentVolumeClaim", "Secret"}
+# Router /metrics authentication renders a ClusterRole for TokenReview and
+# SubjectAccessReview, which a namespace operator cannot create.
+_NAMESPACED_ROUTER_FLAGS = ("--set", "router.monitoring.prometheus.auth.enabled=false")
+
 CommandRunner = Callable[..., Awaitable[CommandResult]]
 
 
@@ -165,7 +178,8 @@ def discover_guide_overlays(source_root: Path) -> list[GuideOverlay]:
         modelserver_root = guide_root / "modelserver"
         if not modelserver_root.is_dir():
             continue
-        descriptor = _guide_descriptor(guide_root)
+        descriptor = load_guide_document(guide_root)
+        follows_guide_steps = declares_modelserver_steps(descriptor)
         support = descriptor.get("support") if isinstance(descriptor.get("support"), dict) else {}
         accelerator_support = support.get("accelerators") if isinstance(support.get("accelerators"), dict) else {}
         declared_engines = support.get("engines") if isinstance(support.get("engines"), dict) else {}
@@ -189,7 +203,6 @@ def discover_guide_overlays(source_root: Path) -> list[GuideOverlay]:
             accelerator_label = _metadata_label(support_entry, accelerator)
             engine_label = _metadata_label(declared_engines.get(engine), engine)
             variant_label = _overlay_variant_label(support_entry, variant, engine)
-            standard_values = _router_values_path(source_root, guide_root.name, engine)
             reason = None
             if "components" in parts or "common" in parts:
                 reason = "overlay is an internal Kustomize component"
@@ -204,9 +217,14 @@ def discover_guide_overlays(source_root: Path) -> list[GuideOverlay]:
                 reason = "overlay is not an engine deployment entry point"
             elif not isinstance(support_entry, dict) or engine not in engines:
                 reason = "accelerator and engine are not declared in the Guide support matrix"
+            elif follows_guide_steps:
+                try:
+                    _guide_steps(source_root, descriptor, accelerator, engine, kustomization.parent)
+                except DomainValidationError as error:
+                    reason = str(error)
             elif not (source_root / "guides" / "recipes" / "router" / "base.values.yaml").is_file():
                 reason = "router base values are unavailable"
-            elif standard_values is None:
+            elif _router_values_path(source_root, guide_root.name, engine) is None:
                 reason = "Guide router values are unavailable"
             entries.append(
                 GuideOverlay(
@@ -327,15 +345,15 @@ class NamespaceDeployer:
         source_root = self._require_source()
         overlay_path, catalog_entry = self._overlay_path(guide, overlay)
         selected_model = _deployment_model(catalog_entry, model)
-        values_path = _router_values_path(source_root, guide, catalog_entry.engine)
-        if values_path is None:
-            raise DomainValidationError(f"Guide {guide!r} has no supported standalone router values")
-        base_values = source_root / "guides" / "recipes" / "router" / "base.values.yaml"
-        if not base_values.is_file():
-            raise DomainValidationError("source is missing guides/recipes/router/base.values.yaml")
+        steps = self._steps(catalog_entry, overlay_path)
 
-        model_result = await self._command(["kubectl", "kustomize", str(overlay_path)])
-        model_documents = _parse_documents(model_result.stdout, "Kustomize")
+        model_documents: list[dict[str, Any]] = []
+        for manifest in steps.manifests:
+            if manifest.kustomize:
+                result = await self._command(["kubectl", "kustomize", str(manifest.path)])
+                model_documents.extend(_parse_documents(result.stdout, "Kustomize"))
+            else:
+                model_documents.extend(_parse_documents(manifest.path.read_text(encoding="utf-8"), "Guide manifest"))
         if (
             model is not None
             and selected_model != catalog_entry.model
@@ -347,27 +365,10 @@ class NamespaceDeployer:
         _bind_and_label(model_documents, namespace, name)
 
         release_name = f"{ROUTER_RELEASE_PREFIX}{name}"
-        with _model_value_paths(
-            (base_values, values_path),
-            catalog_entry.model,
-            selected_model,
-        ) as (render_base_values, render_guide_values):
-            helm_args = [
-                "template",
-                release_name,
-                router_chart(),
-                "--namespace",
-                namespace,
-                "--version",
-                router_chart_version(),
-                "--values",
-                str(render_base_values),
-                "--values",
-                str(render_guide_values),
-                "--set-string",
-                _router_stack_selector(name),
-            ]
-            router_result = await self._command(["helm", *helm_args])
+        with _model_value_paths(steps.router_values, catalog_entry.model, selected_model) as values_paths:
+            router_result = await self._command(
+                ["helm", "template", *self._router_arguments(release_name, namespace, name, steps, values_paths)]
+            )
         router_documents = _parse_documents(router_result.stdout, "Helm")
         if model is not None:
             _replace_model_references(
@@ -418,36 +419,17 @@ class NamespaceDeployer:
         )
         await self._refuse_existing_resources(namespace, [*plan.resources, *plan.retained])
         await self._refuse_existing_release(namespace, plan.release_name)
-        source_root = self._require_source()
-        _, catalog_entry = self._overlay_path(guide, plan.overlay)
-        values_path = _router_values_path(source_root, guide, catalog_entry.engine)
-        if values_path is None:  # The render path already rejects this; retain a defensive domain boundary.
-            raise DomainValidationError(f"Guide {guide!r} has no supported standalone router values")
-        base_values = source_root / "guides" / "recipes" / "router" / "base.values.yaml"
+        overlay_path, catalog_entry = self._overlay_path(guide, plan.overlay)
+        steps = self._steps(catalog_entry, overlay_path)
         helm_installed = False
         model_apply_attempted = False
         try:
-            with _model_value_paths(
-                (base_values, values_path),
-                catalog_entry.model,
-                plan.model,
-            ) as (install_base_values, install_guide_values):
+            with _model_value_paths(steps.router_values, catalog_entry.model, plan.model) as values_paths:
                 await self._command(
                     [
                         "helm",
                         "install",
-                        plan.release_name,
-                        router_chart(),
-                        "--namespace",
-                        namespace,
-                        "--version",
-                        router_chart_version(),
-                        "--values",
-                        str(install_base_values),
-                        "--values",
-                        str(install_guide_values),
-                        "--set-string",
-                        _router_stack_selector(name),
+                        *self._router_arguments(plan.release_name, namespace, name, steps, values_paths),
                         "--atomic",
                         "--timeout",
                         f"{max(1, int(self.timeout_seconds * 0.8))}s",
@@ -587,6 +569,31 @@ class NamespaceDeployer:
         if not catalog_entry.supported:
             raise DomainValidationError(catalog_entry.reason or "overlay is not supported by this deployer")
         return path, catalog_entry
+
+    def _steps(self, entry: GuideOverlay, overlay_path: Path) -> GuideSteps:
+        source_root = self._require_source()
+        document = load_guide_document(source_root / "guides" / entry.guide)
+        return _guide_steps(source_root, document, entry.accelerator, entry.engine, overlay_path)
+
+    def _router_arguments(
+        self,
+        release_name: str,
+        namespace: str,
+        name: str,
+        steps: GuideSteps,
+        values_paths: Sequence[Path],
+    ) -> list[str]:
+        arguments = [
+            release_name,
+            steps.router_chart,
+            "--namespace",
+            namespace,
+            "--version",
+            steps.router_chart_version,
+        ]
+        for path in values_paths:
+            arguments.extend(["--values", str(path)])
+        return [*arguments, *_NAMESPACED_ROUTER_FLAGS, "--set-string", _router_stack_selector(name)]
 
     async def _validate_namespaced_documents(self, documents: Sequence[dict[str, Any]], namespace: str) -> None:
         scope = await self._api_resource_scopes()
@@ -821,15 +828,41 @@ class NamespaceDeployer:
         return argv
 
 
-def _guide_descriptor(guide_root: Path) -> dict[str, Any]:
-    path = guide_root / "guide.yaml"
-    if not path.is_file():
-        return {}
-    try:
-        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
+def _guide_steps(
+    source_root: Path,
+    document: Mapping[str, Any],
+    accelerator: str,
+    engine: str,
+    overlay_path: Path,
+) -> GuideSteps:
+    """The Guide's own router and manifest steps, or the legacy layout convention when it declares none."""
+
+    if declares_modelserver_steps(document):
+        try:
+            return resolve_guide_steps(
+                source_root,
+                document,
+                accelerator=accelerator,
+                engine=engine,
+                overlay=overlay_path,
+                defaults={
+                    "ROUTER_STANDALONE_CHART": router_chart(),
+                    "ROUTER_CHART_VERSION": router_chart_version(),
+                },
+            )
+        except GuideStepsError as error:
+            raise DomainValidationError(str(error)) from error
+    guide = overlay_path.relative_to(source_root / "guides").parts[0]
+    values_path = _router_values_path(source_root, guide, engine)
+    base_values = source_root / "guides" / "recipes" / "router" / "base.values.yaml"
+    if values_path is None or not base_values.is_file():
+        raise DomainValidationError(f"Guide {guide!r} has no supported standalone router values")
+    return GuideSteps(
+        router_chart=router_chart(),
+        router_chart_version=router_chart_version(),
+        router_values=(base_values, values_path),
+        manifests=(GuideManifest(kustomize=True, path=overlay_path),),
+    )
 
 
 def _display_identifier(value: str) -> str:
@@ -1101,12 +1134,12 @@ def _replace_model_value(
 
 @contextmanager
 def _model_value_paths(
-    paths: tuple[Path, Path],
+    paths: Sequence[Path],
     default_model: str | None,
     selected_model: str | None,
-) -> Iterator[tuple[Path, Path]]:
+) -> Iterator[tuple[Path, ...]]:
     if not default_model or not selected_model or default_model == selected_model:
-        yield paths
+        yield tuple(paths)
         return
     default_name = default_model.rsplit("/", 1)[-1]
     selected_name = selected_model.rsplit("/", 1)[-1]
@@ -1128,7 +1161,7 @@ def _model_value_paths(
             destination.write_text(yaml.safe_dump(values, sort_keys=False), encoding="utf-8")
             destination.chmod(0o600)
             rewritten.append(destination)
-        yield rewritten[0], rewritten[1]
+        yield tuple(rewritten)
 
 
 def _model_label(model_name: str, model_id: str) -> str:

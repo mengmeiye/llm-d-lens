@@ -918,6 +918,185 @@ def test_cli_catalog_defaults_to_deployable_overlays_and_all_explains_exclusions
     assert excluded["reason"] == "overlay is an internal Kustomize component"
 
 
+_GUIDE_STEPS = """
+name: optimized-baseline
+support:
+  engines: {vllm: vLLM}
+  accelerators:
+    gpu:
+      model: example/model
+      engines: {vllm: validated}
+    npu:
+      model: example/model
+      engines: {vllm: community}
+env:
+  static:
+    REPO_ROOT: $(git rev-parse --show-toplevel)
+    GUIDE_NAME: optimized-baseline
+    NAMESPACE: llm-d-optimized-baseline
+    MONITORING: {default: "false", values: ["false", "true"]}
+    MONITORING_VALUES: {default: ""}
+    ACCELERATOR_TYPE: {default: gpu, values: [gpu, npu]}
+    MODEL_SERVER: {default: vllm, values: [vllm]}
+    INFRA_PROVIDER: {default: base, values: [base]}
+prerequisites:
+  gaie:
+    - run: kubectl apply -f https://example.invalid/crds.yaml
+  namespace:
+    - run: kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+  secrets:
+    - skip_in: [ci]
+      run: kubectl create secret generic llm-d-hf-token -n "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+deploy:
+  router_values:
+    - run: |
+        export ROUTER_BASE_VALUES="${REPO_ROOT}/guides/recipes/router/base.values.yaml"
+        export ROUTER_VALUES="${REPO_ROOT}/guides/${GUIDE_NAME}/router/${GUIDE_NAME}.values.yaml"
+  monitoring_values:
+    - when: {MONITORING: ["true"]}
+      run: export MONITORING_VALUES="-f ${REPO_ROOT}/guides/recipes/router/features/monitoring.values.yaml"
+  accelerator_values:
+    - when: {ACCELERATOR_TYPE: [npu]}
+      run: export ACCELERATOR_VALUES="-f ${REPO_ROOT}/guides/${GUIDE_NAME}/router/npu.values.yaml"
+  standalone:
+    - run: |
+        helm install ${GUIDE_NAME} \\
+          ${ROUTER_STANDALONE_CHART} \\
+          -f ${ROUTER_BASE_VALUES} \\
+          ${MONITORING_VALUES} \\
+          -f ${ROUTER_VALUES} \\
+          ${ACCELERATOR_VALUES:-} \\
+          -n ${NAMESPACE} --version ${ROUTER_CHART_VERSION}
+  gateway:
+    - run: helm install ${GUIDE_NAME} ${ROUTER_GATEWAY_CHART} -n ${NAMESPACE}
+  modelserver:
+    - run: |
+        kubectl apply -n ${NAMESPACE} \\
+          -k ${REPO_ROOT}/guides/${GUIDE_NAME}/modelserver/${ACCELERATOR_TYPE}/${MODEL_SERVER}/${INFRA_PROVIDER}/
+  render:
+    - when: {ACCELERATOR_TYPE: [npu]}
+      run: kubectl apply -n ${NAMESPACE} -k ${REPO_ROOT}/guides/${GUIDE_NAME}/render/
+  monitoring:
+    - when: {MONITORING: ["true"]}
+      run: kubectl apply -n ${NAMESPACE} -k ${REPO_ROOT}/guides/recipes/modelserver/components/monitoring
+"""
+
+
+def _guide_steps_source(tmp_path: Path) -> Path:
+    source = _source(tmp_path)
+    guide_root = source / "guides" / "optimized-baseline"
+    (guide_root / "guide.yaml").write_text(_GUIDE_STEPS, encoding="utf-8")
+    npu = guide_root / "modelserver" / "npu" / "vllm" / "base"
+    npu.mkdir(parents=True)
+    (npu / "kustomization.yaml").write_text("resources: []\n", encoding="utf-8")
+    (guide_root / "router" / "npu.values.yaml").write_text("router: {npu: true}\n", encoding="utf-8")
+    render = guide_root / "render"
+    render.mkdir()
+    (render / "kustomization.yaml").write_text("resources: []\n", encoding="utf-8")
+    (source / "guides" / "env.sh").write_text(
+        "export ROUTER_CHART_VERSION=${ROUTER_CHART_VERSION:-v9}\n"
+        "export ROUTER_STANDALONE_CHART=${ROUTER_STANDALONE_CHART:-oci://example.invalid/router}\n",
+        encoding="utf-8",
+    )
+    return source
+
+
+class GuideStepsRunner(FakeRunner):
+    """Renders a distinct Service for the Guide's extra render Kustomization."""
+
+    async def __call__(self, argv, *, input=None, timeout=None):  # noqa: A002
+        command = list(argv)
+        if command[:2] == ["kubectl", "kustomize"] and command[2].endswith("/render"):
+            self.commands.append(command)
+            self.inputs.append(input)
+            document = {"apiVersion": "v1", "kind": "Service", "metadata": {"name": "render"}}
+            return _result(argv, stdout=yaml.safe_dump(document))
+        return await super().__call__(argv, input=input, timeout=timeout)
+
+
+def _helm_values(command: list[str]) -> list[str]:
+    return [Path(command[index + 1]).name for index, value in enumerate(command) if value == "--values"]
+
+
+@pytest.mark.asyncio
+async def test_render_follows_guide_declared_router_values_and_chart(tmp_path):
+    runner = GuideStepsRunner()
+    deployer = NamespaceDeployer(_guide_steps_source(tmp_path), runner=runner)
+
+    await deployer.render(
+        namespace="team-a",
+        name="demo",
+        guide="optimized-baseline",
+        overlay="guides/optimized-baseline/modelserver/npu/vllm/base",
+    )
+
+    [template] = [command for command in runner.commands if command[:2] == ["helm", "template"]]
+    assert template[3:4] == ["oci://example.invalid/router"]
+    assert template[template.index("--version") + 1] == "v9"
+    assert _helm_values(template) == ["base.values.yaml", "optimized-baseline.values.yaml", "npu.values.yaml"]
+    assert "router.monitoring.prometheus.auth.enabled=false" in template
+
+
+@pytest.mark.asyncio
+async def test_deploy_applies_and_inventories_guide_declared_namespaced_manifests(tmp_path):
+    runner = GuideStepsRunner()
+    deployer = NamespaceDeployer(_guide_steps_source(tmp_path), runner=runner)
+
+    inventory = await deployer.deploy(
+        namespace="team-a",
+        name="demo",
+        guide="optimized-baseline",
+        overlay="guides/optimized-baseline/modelserver/npu/vllm/base",
+    )
+
+    assert [f"{item.kind}/{item.name}" for item in inventory.resources] == ["Deployment/model-server", "Service/render"]
+    applied = [
+        document
+        for command, stdin in zip(runner.commands, runner.inputs, strict=True)
+        if command[:3] == ["kubectl", "apply", "--namespace"]
+        for document in yaml.safe_load_all(stdin or "")
+        if document and document.get("kind") == "Service"
+    ]
+    assert applied[0]["metadata"]["labels"][DEPLOYMENT_LABEL] == "demo"
+    helm_commands = [" ".join(command) for command in runner.commands if command[0] == "helm"]
+    assert not any("ROUTER_GATEWAY_CHART" in command for command in helm_commands)
+
+
+@pytest.mark.asyncio
+async def test_guide_steps_skip_alternatives_that_do_not_match_the_overlay(tmp_path):
+    runner = GuideStepsRunner()
+    deployer = NamespaceDeployer(_guide_steps_source(tmp_path), runner=runner)
+
+    plan = await deployer.render(
+        namespace="team-a",
+        name="demo",
+        guide="optimized-baseline",
+        overlay="guides/optimized-baseline/modelserver/gpu/vllm/base",
+    )
+
+    [template] = [command for command in runner.commands if command[:2] == ["helm", "template"]]
+    assert _helm_values(template) == ["base.values.yaml", "optimized-baseline.values.yaml"]
+    assert [item.kind for item in plan.resources] == ["Deployment"]
+
+
+def test_catalog_rejects_guide_step_that_changes_the_namespace_outside_kubectl_apply(tmp_path):
+    source = _guide_steps_source(tmp_path)
+    guide = source / "guides" / "optimized-baseline" / "guide.yaml"
+    guide.write_text(
+        guide.read_text(encoding="utf-8")
+        + "  storage:\n"
+        + "    - run: envsubst < ${REPO_ROOT}/pvc.yaml | kubectl apply -n ${NAMESPACE} -f -\n",
+        encoding="utf-8",
+    )
+
+    entries = {entry.accelerator: entry for entry in discover_guide_overlays(source)}
+
+    assert entries["gpu"].supported is False
+    assert entries["gpu"].reason == (
+        "guide.yaml step deploy.storage changes the cluster with a command this deployer cannot follow"
+    )
+
+
 def test_cli_list_prints_stack_inventories_not_catalog_rows(tmp_path, monkeypatch, capsys):
     runner = FakeRunner()
     deployer = NamespaceDeployer(_source(tmp_path), runner=runner)
