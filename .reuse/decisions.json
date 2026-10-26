@@ -306,8 +306,8 @@
       "approvedBy": "user",
       "approvalRef": "VS Code user response to SSH Trust decision e0327565-6da1-429e-bc18-dfbf81f0ece9",
       "resolvedAt": "2026-09-29T07:42:03.409Z"
-        },
-        {
+    },
+    {
       "id": "b6665735-4f2f-4e3a-bf94-4e75d9e5f048",
       "status": "resolved",
       "kind": "semantic",
@@ -375,6 +375,35 @@
       "approvedBy": "User",
       "approvalRef": "This conversation: 2026-09-30 user affirmative reply to the explicit proxy-policy confirmation request",
       "resolvedAt": "2026-09-30T09:07:31.858Z"
+    },
+    {
+      "id": "4367ca74-bd4b-452b-a22f-f51e32339533",
+      "status": "resolved",
+      "kind": "semantic",
+      "summary": "The requested local UI should reuse the authenticated Lens interface, but the existing sign-in session is database-backed while llmd ui is required to remain database-free; choosing hosted authentication versus a trusted loopback session changes the runtime and security contract.",
+      "options": [
+        "Keep llmd ui database-free and loopback-only; reuse the Lens shell, navigation, and deployment presentation without showing a credential login.",
+        "Use the existing hosted Lens authentication and database-backed session; expose only namespace-scoped non-admin deployment features after sign-in."
+      ],
+      "createdAt": "2026-10-09T15:41:46.176Z",
+      "evidence": [
+        {
+          "path": "src/App.jsx",
+          "hash": "f2565135feda40a9bb6dea609c0de5d43bfec7d1d90d22f09888a622f4911ae1"
+        },
+        {
+          "path": "src/features/auth/AuthProvider.jsx",
+          "hash": "39be4c16f3c8a847e153a7c3615f12037be3d4b24c0587a2687ded70b69782a8"
+        },
+        {
+          "path": "llm_d_bench/deploy/local_api.py",
+          "hash": "958db4c65c39c4df9fd1d4925f0f4e1ae325969ba3027df021be10ab25b47a21"
+        }
+      ],
+      "decision": "Keep llmd ui database-free and loopback-only. Reuse the Lens shell plus its Clusters and Deployments navigation, entering directly as an implicit local namespace operator without credential login; kubeconfig imports and context selection remain process-local and non-persistent.",
+      "approvedBy": "User",
+      "approvalRef": "Conversation approval and Clusters-to-Deployments direction on 2026-10-09",
+      "resolvedAt": "2026-10-09T15:43:41.208Z"
     }
   ]
 }

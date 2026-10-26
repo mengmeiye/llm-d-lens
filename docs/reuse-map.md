@@ -121,8 +121,8 @@ JSON HTTP requests, response parsing, and consistent API errors with structured 
 - Entry point: [src/api/httpClient.js](../src/api/httpClient.js)
 - Symbols: `requestJson`, `postJson`, `readJson`, `problemError`
 - Boundaries: JSON only; streaming chat, binary downloads and authentication policy stay in domain clients. Check fallback/204/error semantics before reuse. errorFactory adapts domain validation errors without changing shared transport; FormData requests must omit Content-Type. strictJson preserves strict success parsing for bootstrap and config; failures still use errorFactory. expectedStatus enforces an exact success status (e.g. the deployment DELETE 204 contract) without bypassing CSRF/credentials.
-- Examples: [src/components/AIProviders/aiProvidersBackend.js](../src/components/AIProviders/aiProvidersBackend.js), [src/components/ModelCache/modelCacheBackend.js](../src/components/ModelCache/modelCacheBackend.js), [src/components/OptimizationWorkspace/remoteDeployBackend.js](../src/components/OptimizationWorkspace/remoteDeployBackend.js), [src/components/OptimizationWorkspace/guidePlanningBackend.js](../src/components/OptimizationWorkspace/guidePlanningBackend.js)
-- Tests: [src/api/httpClient.test.js](../src/api/httpClient.test.js), [src/components/OptimizationWorkspace/remoteDeployBackend.test.js](../src/components/OptimizationWorkspace/remoteDeployBackend.test.js), [src/components/OptimizationWorkspace/guidePlanningBackend.test.js](../src/components/OptimizationWorkspace/guidePlanningBackend.test.js), [src/features/evaluation/client.test.js](../src/features/evaluation/client.test.js)
+- Examples: [src/components/AIProviders/aiProvidersBackend.js](../src/components/AIProviders/aiProvidersBackend.js), [src/components/ModelCache/modelCacheBackend.js](../src/components/ModelCache/modelCacheBackend.js), [src/components/OptimizationWorkspace/remoteDeployBackend.js](../src/components/OptimizationWorkspace/remoteDeployBackend.js), [src/components/OptimizationWorkspace/guidePlanningBackend.js](../src/components/OptimizationWorkspace/guidePlanningBackend.js), [src/components/DeploymentManagement/namespaceDeploymentBackend.js](../src/components/DeploymentManagement/namespaceDeploymentBackend.js)
+- Tests: [src/api/httpClient.test.js](../src/api/httpClient.test.js), [src/components/OptimizationWorkspace/remoteDeployBackend.test.js](../src/components/OptimizationWorkspace/remoteDeployBackend.test.js), [src/components/OptimizationWorkspace/guidePlanningBackend.test.js](../src/components/OptimizationWorkspace/guidePlanningBackend.test.js), [src/components/DeploymentManagement/namespaceDeploymentBackend.test.js](../src/components/DeploymentManagement/namespaceDeploymentBackend.test.js), [src/features/evaluation/client.test.js](../src/features/evaluation/client.test.js)
 
 ## async-state
 
@@ -334,6 +334,76 @@ Download a browser Blob with temporary URL cleanup.
 - Examples: [src/components/benchmark-results/resultExports.js](../src/components/benchmark-results/resultExports.js), [src/components/OptimizationEvaluationDetails.jsx](../src/components/OptimizationEvaluationDetails.jsx), [src/components/SimulationDashboard.jsx](../src/components/SimulationDashboard.jsx)
 - Tests: [src/utils/browserActions.test.js](../src/utils/browserActions.test.js)
 
+## deployment-lifecycle-presentation
+
+Normalize hosted execution and namespace inventory lifecycle states for shared deployment filters, labels, dots, and summary counts.
+
+- Entry point: [src/components/DeploymentManagement/deploymentPresentation.js](../src/components/DeploymentManagement/deploymentPresentation.js)
+- Symbols: `STATUS_GROUPS`, `STATUS_FILTER_OPTIONS`, `statusGroup`, `statusTone`, `statusLabel`, `derivePodStatusGroup`, `effectiveStatusGroup`, `effectiveStatusLabel`, `summarizeStatuses`
+- Boundaries: Presentation only. Hosted deployment state and namespace inventory state retain their own backend contracts; this module maps both into Ready, In progress, Failed, and Cleaned UI groups without changing lifecycle authority.
+- Examples: [src/components/DeploymentManagement/DeploymentManagementPage.jsx](../src/components/DeploymentManagement/DeploymentManagementPage.jsx), [src/components/DeploymentManagement/NamespaceDeploymentView.jsx](../src/components/DeploymentManagement/NamespaceDeploymentView.jsx), [src/components/DeploymentManagement/DeploymentTable.jsx](../src/components/DeploymentManagement/DeploymentTable.jsx)
+- Tests: [src/components/DeploymentManagement/deploymentPresentation.test.js](../src/components/DeploymentManagement/deploymentPresentation.test.js)
+
+## deployment-responsive-table
+
+Render the shared responsive deployment inventory table for hosted executions and local namespace inventories.
+
+- Entry point: [src/components/DeploymentManagement/DeploymentTable.jsx](../src/components/DeploymentManagement/DeploymentTable.jsx)
+- Symbols: `DeploymentTable`
+- Boundaries: Callers opt into row actions and Pod expansion by supplying callbacks and a podsLoader. Omitting hosted-only callbacks removes those affordances; mutation, authorization, polling, and backend lifecycle rules remain in callers.
+- Examples: [src/components/DeploymentManagement/DeploymentManagementPage.jsx](../src/components/DeploymentManagement/DeploymentManagementPage.jsx), [src/components/DeploymentManagement/NamespaceDeploymentView.jsx](../src/components/DeploymentManagement/NamespaceDeploymentView.jsx)
+- Tests: Lifecycle mapping is covered by deploymentPresentation.test.js; optional-action composition is covered by focused ESLint, type-check, and production build checks because this repository has no jsdom/table rendering harness.
+
+## deployment-status-summary
+
+Render the shared deployment lifecycle summary cards for hosted and namespace-scoped deployment inventories.
+
+- Entry point: [src/components/DeploymentManagement/DeploymentSummary.jsx](../src/components/DeploymentManagement/DeploymentSummary.jsx)
+- Symbols: `DeploymentSummary`
+- Boundaries: Presentation only. Callers map domain statuses through deploymentPresentation.summarizeStatuses and retain loading, filtering, polling, and mutation behavior.
+- Examples: [src/components/DeploymentManagement/DeploymentManagementPage.jsx](../src/components/DeploymentManagement/DeploymentManagementPage.jsx), [src/components/DeploymentManagement/NamespaceDeploymentView.jsx](../src/components/DeploymentManagement/NamespaceDeploymentView.jsx)
+- Tests: [src/components/DeploymentManagement/deploymentPresentation.test.js](../src/components/DeploymentManagement/deploymentPresentation.test.js)
+
+## kubeconfig-file-picker
+
+Present one reusable kubeconfig file chooser in hosted cluster registration and the database-free local Clusters page.
+
+- Entry point: [src/components/shared/KubeconfigFilePicker.jsx](../src/components/shared/KubeconfigFilePicker.jsx)
+- Symbols: `KubeconfigFilePicker`
+- Boundaries: Presentation only. Returns the selected browser File and clears the native input so the same file can be selected again. Callers own validation, upload, persistence, credential lifecycle, and connection changes.
+- Examples: [src/components/CreateClusterWizard.jsx](../src/components/CreateClusterWizard.jsx), [src/components/NamespaceClusterOverview.jsx](../src/components/NamespaceClusterOverview.jsx)
+- Tests: Both callers are covered by focused lint and production build checks; upload transport and server-side credential lifecycle have domain tests.
+
+## local-mode-header-actions
+
+Keep the database-free status and refresh control consistent across the local Clusters and Deployments pages.
+
+- Entry point: [src/components/shared/LocalModeHeaderActions.jsx](../src/components/shared/LocalModeHeaderActions.jsx)
+- Symbols: `LocalModeHeaderActions`
+- Boundaries: Presentation only. Callers own refresh behavior, pending state, data loading, and local-mode access policy.
+- Examples: [src/components/NamespaceClusterOverview.jsx](../src/components/NamespaceClusterOverview.jsx), [src/components/DeploymentManagement/NamespaceDeploymentView.jsx](../src/components/DeploymentManagement/NamespaceDeploymentView.jsx)
+- Tests: Both callers and the shared composition are covered by focused ESLint, type-check, and production build checks.
+
+## namespace-deployment-browser-client
+
+Adapt the database-free local connection and deployment REST routes for the shared Clusters and Deployments browser modules.
+
+- Entry point: [src/components/DeploymentManagement/namespaceDeploymentBackend.js](../src/components/DeploymentManagement/namespaceDeploymentBackend.js)
+- Symbols: `getNamespaceDeploymentInfo`, `importNamespaceKubeconfig`, `selectNamespaceKubeconfigContext`, `removeNamespaceKubeconfigConnection`, `getNamespaceGuideCatalog`, `getNamespaceClusterCapabilities`, `renderNamespaceDeployment`, `deployNamespaceDeployment`, `listNamespaceDeployments`, `getNamespaceDeploymentStatus`, `teardownNamespaceDeployment`
+- Boundaries: Local-mode transport only. Reuses the shared JSON client, preserves namespace and name URL encoding, and leaves multipart Content-Type generation to the browser. It performs no deployment validation, credential persistence, polling, or lifecycle policy; those remain with the page and local API.
+- Examples: [src/components/NamespaceClusterOverview.jsx](../src/components/NamespaceClusterOverview.jsx), [src/components/DeploymentManagement/NamespaceDeploymentView.jsx](../src/components/DeploymentManagement/NamespaceDeploymentView.jsx)
+- Tests: [src/components/DeploymentManagement/namespaceDeploymentBackend.test.js](../src/components/DeploymentManagement/namespaceDeploymentBackend.test.js)
+
+## namespace-deployment-catalog-facets
+
+Project deployable Guide catalog leaves into cascading architecture, accelerator, inference-engine, and deployment-profile options, apply unambiguous cluster recommendations, and present the authoritative base overlay clearly on detected OpenShift clusters.
+
+- Entry point: [src/components/DeploymentManagement/deploymentCatalog.js](../src/components/DeploymentManagement/deploymentCatalog.js)
+- Symbols: `deploymentCatalogFacets`, `presentedDeploymentProfiles`, `recommendedAccelerator`, `recommendedDeploymentProfile`, `onlyOption`
+- Boundaries: React-independent presentation mapping only. The upstream catalog owns engine eligibility, labels, deployability, and the final overlay. OpenShift presentation relabels existing base options without creating a value or manifest. Recommendations never remove manual choices and return an empty selection when several detected or nested profiles match.
+- Examples: [src/components/DeploymentManagement/NamespaceDeploymentView.jsx](../src/components/DeploymentManagement/NamespaceDeploymentView.jsx)
+- Tests: [src/components/DeploymentManagement/deploymentCatalog.test.js](../src/components/DeploymentManagement/deploymentCatalog.test.js)
+
 ## clipboard-copy
 
 Copy text with clipboard API and legacy HTTP fallback.
@@ -358,11 +428,41 @@ React clipboard success feedback, latest-action tracking and timer cleanup.
 
 Kubernetes namespace DNS-label validation.
 
-- Entry point: [llm_d_bench/utils/kubernetes.py](../llm_d_bench/utils/kubernetes.py)
+- Entry point: [llm_d_bench/utils/kubernetes_names.py](../llm_d_bench/utils/kubernetes_names.py)
 - Symbols: `validate_namespace`
 - Boundaries: Validates without normalization; preserves ValueError message and 63-character limit. Monitoring services re-export the same function for callers and model validators.
-- Examples: [llm_d_bench/monitoring/accelerator/service.py](../llm_d_bench/monitoring/accelerator/service.py), [llm_d_bench/monitoring/cluster_stack/service.py](../llm_d_bench/monitoring/cluster_stack/service.py)
+- Examples: [llm_d_bench/utils/kubernetes.py](../llm_d_bench/utils/kubernetes.py), [llm_d_bench/deploy/namespace_deployer.py](../llm_d_bench/deploy/namespace_deployer.py), [llm_d_bench/monitoring/accelerator/service.py](../llm_d_bench/monitoring/accelerator/service.py), [llm_d_bench/monitoring/cluster_stack/service.py](../llm_d_bench/monitoring/cluster_stack/service.py)
 - Tests: [llm_d_bench/utils/test_namespace.py](../llm_d_bench/utils/test_namespace.py), [llm_d_bench/monitoring/accelerator/test_accelerator.py](../llm_d_bench/monitoring/accelerator/test_accelerator.py), [llm_d_bench/monitoring/cluster_stack/test_cluster_stack.py](../llm_d_bench/monitoring/cluster_stack/test_cluster_stack.py)
+
+## guide-deploy-steps
+
+Resolve an llm-d Guide's guide.yaml standalone router install and namespaced kubectl apply steps for one model-server overlay without running shell.
+
+- Entry point: [llm_d_bench/deploy/guide_steps.py](../llm_d_bench/deploy/guide_steps.py)
+- Symbols: `GuideStepsError`, `GuideManifest`, `GuideSteps`, `load_guide_document`, `declares_modelserver_steps`, `router_chart_coordinates`, `resolve_guide_steps`
+- Boundaries: Read-only parsing of upstream guide.yaml and guides/env.sh defaults; never executes commands. Resolves when: filters against the overlay's coordinates, skips Gateway Mode, monitoring, alternative model-server steps, cluster-wide prerequisites and namespace/Secret creation, and raises GuideStepsError for remote or out-of-checkout manifests and for any other cluster-changing command it cannot follow. Callers own rendering, namespace policy, labeling and inventory.
+- Examples: [llm_d_bench/deploy/namespace_deployer.py](../llm_d_bench/deploy/namespace_deployer.py)
+- Tests: [llm_d_bench/deploy/test_namespace_deployer.py](../llm_d_bench/deploy/test_namespace_deployer.py)
+
+## namespace-stack-deployer
+
+Discover labeled official llm-d Guide Kustomize overlays, provide advisory accelerator/platform detection, and own a database-free render, deploy, status, inventory, and exact teardown lifecycle in one existing namespace.
+
+- Entry point: [llm_d_bench/deploy/namespace_deployer.py](../llm_d_bench/deploy/namespace_deployer.py)
+- Symbols: `DeploymentCommandError`, `GuideOverlay`, `ClusterCapabilities`, `ResourceIdentity`, `RenderedPlan`, `NamespaceDeployer`, `DeploymentInventory`, `discover_guide_overlays`, `resolve_source_root`
+- Boundaries: Local source checkout and ambient, explicitly selected, or local-process ephemeral kubeconfig only. with_connection creates an equivalent immutable connection snapshot for API operations. Capability detection resolves hardware through registered profiles, returns normalized hints only, and degrades on permission denial, unavailable reads, unknown hardware, or ambiguity; it never gates deployment. The lifecycle rejects cluster-scoped, cross-namespace, missing-API, undeclared/internal overlays, existing rendered objects, and existing derived Helm releases before mutation; server dry-runs every plan. Creates no namespace or infrastructure prerequisites. An optional validated Hugging Face model ID replaces the Guide-declared model in rendered resources and process-temporary Helm values, but does not retune Guide resources or engine flags; overrides are rejected when the rendered model-server documents have no safe full-ID patch point. Router chart, version and values plus extra namespaced applies follow the Guide's guide.yaml deploy steps when it declares them (the legacy router values convention otherwise); router metrics authentication is disabled so the chart renders no cluster RBAC; same-plan RoleBindings are preflighted with a binding permission check instead of a dry-run. Router Helm selection is stack-specific, create-only, and installed atomically; status verifies the recorded release. Inventory is a namespaced ConfigMap without credentials or manifests; teardown rechecks API scope and ownership labels, and retains PVCs, Secrets, the namespace, and unrecorded objects.
+- Examples: [llm_d_bench/deploy/cli.py](../llm_d_bench/deploy/cli.py), [llm_d_bench/deploy/local_api.py](../llm_d_bench/deploy/local_api.py)
+- Tests: [llm_d_bench/deploy/test_namespace_deployer.py](../llm_d_bench/deploy/test_namespace_deployer.py)
+
+## namespace-deployer-local-api
+
+Compose the namespace stack deployer and its non-sensitive cluster capability hints as a database-free FastAPI router and loopback web application.
+
+- Entry point: [llm_d_bench/deploy/local_api.py](../llm_d_bench/deploy/local_api.py)
+- Symbols: `NamespaceDeploymentRequest`, `LocalContextRequest`, `LocalConnectionManager`, `create_local_router`, `create_local_app`
+- Boundaries: The caller fixes the deployment source when constructing NamespaceDeployer. Render and deploy accept the same optional bounded Hugging Face model ID and delegate semantic validation and rewriting to the deployer. The connection starts from ambient resolution or CLI flags; the browser may upload multiple kubeconfigs of at most 1 MiB of UTF-8 content, select only declared contexts, and forget imported entries without modifying Kubernetes. Capability responses contain normalized accelerator/platform recommendations and safe fallback reasons only. The connection catalog exists only in process memory. Uploads use 0600 files under the Lens scratch root, are never exposed or persisted in a database, and are removed at shutdown. This composition has no multi-user authentication and must only be served through the llmd UI command, which enforces loopback binding; the app also rejects non-loopback Host headers.
+- Examples: [llm_d_bench/deploy/cli.py](../llm_d_bench/deploy/cli.py), [src/components/DeploymentManagement/namespaceDeploymentBackend.js](../src/components/DeploymentManagement/namespaceDeploymentBackend.js)
+- Tests: [llm_d_bench/deploy/test_namespace_deployer.py](../llm_d_bench/deploy/test_namespace_deployer.py)
 
 ## upstream-json-transport
 
@@ -879,8 +979,8 @@ Browser-facing authentication/authorization gateway that resolves sessions, prot
 Frontend permission matching and a view-to-permission catalog for route guards and navigation filtering.
 
 - Entry point: [src/features/auth/permissions.js](../src/features/auth/permissions.js)
-- Symbols: `permissionMatches`, `hasPermission`, `canAccessView`
-- Boundaries: Mirrors llm_d_bench/auth/permissions.py segment wildcards. UI hiding is affordance only; backend remains authoritative. Keep VIEW_PERMISSIONS in step with the design page matrix.
+- Symbols: `permissionMatches`, `hasPermission`, `canAccessView`, `canAccessLocalNamespaceView`, `LOCAL_NAMESPACE_PERMISSIONS`
+- Boundaries: Mirrors llm_d_bench/auth/permissions.py segment wildcards for hosted sessions. The explicit local namespace view catalog is limited to Clusters and Deployments and is an affordance for the loopback-only database-free UI, not a hosted role or authorization boundary. UI hiding is affordance only; backend remains authoritative. Keep VIEW_PERMISSIONS in step with the design page matrix.
 - Examples: [src/App.jsx](../src/App.jsx), [src/components/LeftNavigation.jsx](../src/components/LeftNavigation.jsx), [src/features/auth/PermissionGate.jsx](../src/features/auth/PermissionGate.jsx)
 - Tests: [src/features/auth/permissions.test.js](../src/features/auth/permissions.test.js)
 
@@ -890,7 +990,7 @@ React context maintaining the current principal and permission checks.
 
 - Entry point: [src/features/auth/AuthProvider.jsx](../src/features/auth/AuthProvider.jsx)
 - Symbols: `AuthProvider`
-- Boundaries: Session is a revocable httpOnly cookie; this provider only mirrors /api/v1/auth/session. 401 from httpClient dispatches prism:auth-expired to reset state. Use useAuth() inside the provider.
+- Boundaries: Hosted sessions mirror the revocable httpOnly cookie from /api/v1/auth/session; 401 from httpClient dispatches prism:auth-expired to reset state. The explicit local session mode is an implicit loopback-only namespace operator for llmd ui, exposes only the Clusters and Deployments views, and provides no login, logout, or authorization boundary. Use useAuth() inside the provider; backend policy remains authoritative.
 - Examples: [src/App.jsx](../src/App.jsx), [src/features/auth/LoginPage.jsx](../src/features/auth/LoginPage.jsx)
 - Tests: [src/features/auth/permissions.test.js](../src/features/auth/permissions.test.js)
 
@@ -934,7 +1034,7 @@ Shared periodic page-data refresh hook with quiet refreshes, unmount cleanup, hi
 - Entry point: [src/hooks/usePolling.js](../src/hooks/usePolling.js)
 - Symbols: `usePolling`
 - Boundaries: Use this for server-state freshness instead of a full page reload or an ad-hoc setInterval. Default interval is 5s; gate with enabled when there is nothing to watch (e.g. only while a download is in flight). Callbacks should refresh quietly — keep existing rows and reuse the page's load({ quiet: true }) instead of a full-page loading state — and must not disturb filters, form input, selected rows or open dialogs. Specialized loops with cancellation/streaming semantics (port-forward, logs, clocks) may keep their own timer but must still pause when hidden and clean up on unmount.
-- Examples: [src/components/Administration/UsersPage.jsx](../src/components/Administration/UsersPage.jsx), [src/components/ModelMarketPage.jsx](../src/components/ModelMarketPage.jsx), [src/components/AIProviders/AIProvidersPage.jsx](../src/components/AIProviders/AIProvidersPage.jsx), [src/components/DeploymentManagement/DeploymentManagementPage.jsx](../src/components/DeploymentManagement/DeploymentManagementPage.jsx), [src/components/EvaluationDashboard.jsx](../src/components/EvaluationDashboard.jsx), [src/components/ModelCache/ModelCachePage.jsx](../src/components/ModelCache/ModelCachePage.jsx)
+- Examples: [src/components/Administration/UsersPage.jsx](../src/components/Administration/UsersPage.jsx), [src/components/ModelMarketPage.jsx](../src/components/ModelMarketPage.jsx), [src/components/AIProviders/AIProvidersPage.jsx](../src/components/AIProviders/AIProvidersPage.jsx), [src/components/DeploymentManagement/DeploymentManagementPage.jsx](../src/components/DeploymentManagement/DeploymentManagementPage.jsx), [src/components/EvaluationDashboard.jsx](../src/components/EvaluationDashboard.jsx), [src/components/ModelCache/ModelCachePage.jsx](../src/components/ModelCache/ModelCachePage.jsx), [src/components/DeploymentManagement/NamespaceDeploymentView.jsx](../src/components/DeploymentManagement/NamespaceDeploymentView.jsx)
 - Tests: No dedicated unit test: this repo has no jsdom/testing-library setup, so the timer, visibility-pause and overlap guards are covered indirectly by the pages that use usePolling plus the type/build checks.
 
 ## agentic-deployment-workspace
