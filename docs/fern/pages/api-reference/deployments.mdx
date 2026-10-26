@@ -14,6 +14,357 @@ Agentic create and refinement streams use `llm_d_bench.agentic.streaming.plannin
 
 Deployments live under the FastAPI router in `llm_d_bench/deploy/router.py` with the `/api/v1/deployments` prefix.
 
+The database-free local entrance is a separate composition root in
+`llm_d_bench.deploy.local_api`. Its `/api/local/v1` routes bind one local source
+checkout and a process-local Kubernetes connection to `NamespaceDeployer`; they
+do not initialize authentication, a cluster registry, or database services. The
+connection starts from the ambient context or CLI flags and may add multiple
+uploaded kubeconfigs stored only in restricted temporary files. The app
+accepts only loopback HTTP `Host` headers and is served by `llmd ui`, which also
+refuses non-loopback binds. The browser reuses the hosted Lens application shell
+and its Clusters-to-Deployments navigation with an implicit local session; the
+local API remains the authoritative namespace boundary and does not expose
+hosted-only cluster or deployment actions.
+
+### Read local mode information
+
+<Tabs>
+  <Tab title="REST API">
+    **`GET /api/local/v1/info`**
+
+    ```json
+    {"mode":"local","source":"/path/to/llm-d","database":false,"connection":{"source":"ambient","context":null,"contexts":[],"ephemeral":false,"activeConnectionId":"ambient","connections":[{"id":"ambient","label":"Current kubectl context","source":"ambient","context":null,"contexts":[],"ephemeral":false,"active":true}]}}
+    ```
+  </Tab>
+  <Tab title="Python API">
+
+```python
+from llm_d_bench.deploy.local_api import create_local_app
+from llm_d_bench.deploy.namespace_deployer import NamespaceDeployer
+
+app = create_local_app(NamespaceDeployer("/path/to/llm-d"))
+```
+  </Tab>
+</Tabs>
+
+### Import a local kubeconfig
+
+<Tabs>
+  <Tab title="REST API">
+    **`POST /api/local/v1/connection`**
+
+    Send multipart form data with one UTF-8 `file` field. The file must be at
+    most 1 MiB and contain at least one context referencing a declared cluster.
+    Lens adds the file to the process-local connection list and selects its
+    valid `current-context`, or the first context when no valid current context
+    is declared.
+
+    ```json
+    {"source":"uploaded","context":"operator","contexts":["operator"],"ephemeral":true,"activeConnectionId":"uploaded-example","connections":[{"id":"ambient","label":"Current kubectl context","source":"ambient","context":null,"contexts":[],"ephemeral":false,"active":false},{"id":"uploaded-example","label":"config","source":"uploaded","context":"operator","contexts":["operator"],"ephemeral":true,"active":true}]}
+    ```
+
+    The response never includes kubeconfig contents or a filesystem path. The
+    backend writes the upload with `0600` permissions under its scratch root,
+    never stores it in the database or persistent Lens data, and deletes it on
+    server shutdown. Browser uploads must also be same-origin with the local UI.
+  </Tab>
+  <Tab title="Python API">
+
+```python
+from pathlib import Path
+
+from llm_d_bench.deploy.local_api import LocalConnectionManager
+from llm_d_bench.deploy.namespace_deployer import NamespaceDeployer
+
+connection = LocalConnectionManager(NamespaceDeployer("/path/to/llm-d"))
+try:
+    info = connection.import_kubeconfig(Path("/path/to/config").read_bytes(), "config")
+finally:
+    connection.close()
+```
+  </Tab>
+</Tabs>
+
+### Select a local kubeconfig context
+
+<Tabs>
+  <Tab title="REST API">
+    **`POST /api/local/v1/connection/context`**
+
+    ```json
+    {"connectionId":"uploaded-example","context":"operator"}
+    ```
+
+    ```json
+    {"source":"uploaded","context":"operator","contexts":["operator"],"ephemeral":true,"activeConnectionId":"uploaded-example","connections":[{"id":"uploaded-example","label":"config","source":"uploaded","context":"operator","contexts":["operator"],"ephemeral":true,"active":true}]}
+    ```
+
+    The requested connection must be present in the running local process, and
+    the context must be declared by that startup or uploaded kubeconfig.
+    Ambient connections do not expose a context list.
+  </Tab>
+  <Tab title="Python API">
+
+```python
+from pathlib import Path
+
+from llm_d_bench.deploy.local_api import LocalConnectionManager
+from llm_d_bench.deploy.namespace_deployer import NamespaceDeployer
+
+connection = LocalConnectionManager(NamespaceDeployer("/path/to/llm-d"))
+try:
+    imported = connection.import_kubeconfig(
+        Path("/path/to/config").read_bytes(), "config"
+    )
+    info = connection.select_context(
+        "operator", connection_id=imported["activeConnectionId"]
+    )
+finally:
+    connection.close()
+```
+  </Tab>
+</Tabs>
+
+### Remove a local kubeconfig import
+
+<Tabs>
+  <Tab title="REST API">
+    **`DELETE /api/local/v1/connection/{connectionId}`**
+
+    ```json
+    {"source":"ambient","context":null,"contexts":[],"ephemeral":false,"activeConnectionId":"ambient","connections":[{"id":"ambient","label":"Current kubectl context","source":"ambient","context":null,"contexts":[],"ephemeral":false,"active":true}]}
+    ```
+
+    Only an uploaded process-local connection can be removed. Removing the
+    selected import returns selection to the startup or ambient connection. It
+    does not modify Kubernetes resources. Temporary credential files remain
+    protected and are deleted when the local server exits.
+  </Tab>
+  <Tab title="Python API">
+
+```python
+from pathlib import Path
+
+from llm_d_bench.deploy.local_api import LocalConnectionManager
+from llm_d_bench.deploy.namespace_deployer import NamespaceDeployer
+
+connection = LocalConnectionManager(NamespaceDeployer("/path/to/llm-d"))
+try:
+    imported = connection.import_kubeconfig(
+        Path("/path/to/config").read_bytes(), "config"
+    )
+    info = connection.remove_connection(imported["activeConnectionId"])
+finally:
+    connection.close()
+```
+  </Tab>
+</Tabs>
+
+### List local Guide overlays
+
+<Tabs>
+  <Tab title="REST API">
+    **`GET /api/local/v1/catalog`**
+
+    ```json
+    {"items":[{"guide":"optimized-baseline","guide_label":"Optimized Baseline","overlay":"guides/optimized-baseline/modelserver/gpu/vllm/base","accelerator":"gpu","accelerator_label":"NVIDIA GPU","engine":"vllm","engine_label":"vLLM","variant":"base","variant_label":"Kubernetes (base)","model":"example/model","maturity":"validated","supported":true,"reason":null}]}
+    ```
+  </Tab>
+  <Tab title="Python API">
+
+```python
+from llm_d_bench.deploy.namespace_deployer import NamespaceDeployer
+
+items = NamespaceDeployer("/path/to/llm-d").catalog()
+```
+  </Tab>
+</Tabs>
+
+### Detect local cluster capabilities
+
+<Tabs>
+  <Tab title="REST API">
+    **`GET /api/local/v1/cluster-capabilities`**
+
+    ```json
+    {"accelerators":["gpu"],"acceleratorStatus":"detected","acceleratorReason":null,"platform":"gke","platformLabel":"Google Kubernetes Engine","platformStatus":"detected","platformReason":null,"recommendedProfile":"gke"}
+    ```
+
+    The response contains normalized recommendations only. Accelerator probing
+    may require read access to cluster-scoped Nodes or ResourceSlices. A denied,
+    unavailable, unknown, or ambiguous probe returns a fallback status and safe
+    reason without failing deployment or exposing node data, kubeconfig paths,
+    credentials, or raw command errors.
+  </Tab>
+  <Tab title="Python API">
+
+```python
+import asyncio
+from llm_d_bench.deploy.namespace_deployer import NamespaceDeployer
+
+async def main():
+    return (await NamespaceDeployer().capabilities()).payload()
+
+capabilities = asyncio.run(main())
+```
+  </Tab>
+</Tabs>
+
+### Render a local namespace deployment
+
+<Tabs>
+  <Tab title="REST API">
+    **`POST /api/local/v1/render`**
+
+    ```json
+    {"namespace":"my-namespace","name":"demo","guide":"optimized-baseline","overlay":"guides/optimized-baseline/modelserver/gpu/vllm/base","model":"Qwen/Qwen3-32B"}
+    ```
+
+    The response lists managed and retained resources after Kubernetes scope
+    discovery and server dry-run. `model` is optional and defaults to the model
+    declared by the catalog entry. A supplied value must be a Hugging Face
+    `organization/model-name`; render rejects an override when the model-server
+    documents do not expose the Guide-declared model ID as a safe patch point.
+    It does not return kubeconfig or Secret data.
+
+    ```json
+    {"namespace":"my-namespace","name":"demo","guide":"optimized-baseline","overlay":"guides/optimized-baseline/modelserver/gpu/vllm/base","model":"Qwen/Qwen3-32B","releaseName":"llmd-demo","resources":[{"apiVersion":"apps/v1","kind":"Deployment","name":"model-server"}],"retainedResources":[{"apiVersion":"v1","kind":"PersistentVolumeClaim","name":"model-weights"}]}
+    ```
+  </Tab>
+  <Tab title="Python API">
+
+```python
+import asyncio
+from llm_d_bench.deploy.namespace_deployer import NamespaceDeployer
+
+async def main():
+    service = NamespaceDeployer("/path/to/llm-d")
+    return await service.render(namespace="my-namespace", name="demo",
+        guide="optimized-baseline",
+        overlay="guides/optimized-baseline/modelserver/gpu/vllm/base",
+        model="Qwen/Qwen3-32B")
+
+plan = asyncio.run(main())
+```
+  </Tab>
+</Tabs>
+
+### List local namespace deployments
+
+<Tabs>
+  <Tab title="REST API">
+    **`GET /api/local/v1/deployments?namespace=my-namespace`**
+
+    ```json
+    {"items":[{"namespace":"my-namespace","name":"demo","guide":"optimized-baseline","model":"Qwen/Qwen3-32B","status":"installed"}]}
+    ```
+  </Tab>
+  <Tab title="Python API">
+
+```python
+import asyncio
+from llm_d_bench.deploy.namespace_deployer import NamespaceDeployer
+
+async def main():
+    return await NamespaceDeployer().list("my-namespace")
+
+items = asyncio.run(main())
+```
+  </Tab>
+</Tabs>
+
+### Read local namespace deployment status
+
+<Tabs>
+  <Tab title="REST API">
+    **`GET /api/local/v1/deployments/demo?namespace=my-namespace`**
+
+    The response includes `status`, `missingResources`, the recorded Helm release
+    state, and the exact inventory with a `present` flag on every managed resource.
+
+    ```json
+    {"namespace":"my-namespace","name":"demo","model":"Qwen/Qwen3-32B","status":"installed","resources":[{"apiVersion":"apps/v1","kind":"Deployment","name":"model-server","present":true}],"missingResources":0,"releasePresent":true,"releaseStatus":"deployed"}
+    ```
+  </Tab>
+  <Tab title="Python API">
+
+```python
+import asyncio
+from llm_d_bench.deploy.namespace_deployer import NamespaceDeployer
+
+async def main():
+    return await NamespaceDeployer().status("my-namespace", "demo")
+
+status = asyncio.run(main())
+```
+  </Tab>
+</Tabs>
+
+### Deploy a local namespace stack
+
+<Tabs>
+  <Tab title="REST API">
+    **`POST /api/local/v1/deployments`**
+
+    ```json
+    {"namespace":"my-namespace","name":"demo","guide":"optimized-baseline","overlay":"guides/optimized-baseline/modelserver/gpu/vllm/base","model":"Qwen/Qwen3-32B"}
+    ```
+
+    A `201` response contains the namespaced ownership inventory. The operation
+    refuses an existing inventory, rendered object, or derived Helm release.
+    Router installation is atomic, so Helm rolls back a failed install. The
+    optional `model` field follows the render contract.
+
+    ```json
+    {"schemaVersion":"llmd.inventory/v1","namespace":"my-namespace","name":"demo","guide":"optimized-baseline","overlay":"guides/optimized-baseline/modelserver/gpu/vllm/base","model":"Qwen/Qwen3-32B","releaseName":"llmd-demo","sourceRevision":null,"resources":[{"apiVersion":"apps/v1","kind":"Deployment","name":"model-server"}],"retainedResources":[],"status":"installed"}
+    ```
+  </Tab>
+  <Tab title="Python API">
+
+```python
+import asyncio
+from llm_d_bench.deploy.namespace_deployer import NamespaceDeployer
+
+async def main():
+    service = NamespaceDeployer("/path/to/llm-d")
+    return await service.deploy(namespace="my-namespace", name="demo",
+        guide="optimized-baseline",
+        overlay="guides/optimized-baseline/modelserver/gpu/vllm/base",
+        model="Qwen/Qwen3-32B")
+
+inventory = asyncio.run(main())
+```
+  </Tab>
+</Tabs>
+
+### Teardown a local namespace stack
+
+<Tabs>
+  <Tab title="REST API">
+    **`DELETE /api/local/v1/deployments/demo?namespace=my-namespace`**
+
+    ```json
+    {"namespace":"my-namespace","name":"demo","status":"removed","retainedResources":[]}
+    ```
+
+    Teardown uninstalls the recorded Helm release, deletes each managed object
+    by exact identity after rechecking its namespaced API scope, and removes the
+    inventory last. It retains the namespace, PVCs, Secrets, and unrecorded objects.
+  </Tab>
+  <Tab title="Python API">
+
+```python
+import asyncio
+from llm_d_bench.deploy.namespace_deployer import NamespaceDeployer
+
+async def main():
+    return await NamespaceDeployer().teardown("my-namespace", "demo")
+
+result = asyncio.run(main())
+```
+  </Tab>
+</Tabs>
+
 Optimized and precise routing capability metadata reuse `shared_prefix_routing_workload()` in `llm_d_bench.deploy.capabilities`. Each scenario and recommended workload receives independent nested values; provider-specific baselines and goals are unchanged. Precise-provider calibration and model discovery share lazy modelserver invocation traversal while retaining their respective last-value and first-model selection rules.
 
 Agentic candidate generation requires its first tool batch to contain exactly
