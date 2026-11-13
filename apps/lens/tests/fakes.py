@@ -380,6 +380,12 @@ class FakeCluster:
 
     def _discovery(self, path: str) -> Result:
         api_version = path.removeprefix("/apis/").removeprefix("/api/")
+        if path.startswith("/apis/") and "/" not in api_version:  # an APIGroup: the versions it serves
+            versions = [served for served in self.served if served.startswith(f"{api_version}/")]
+            if not versions:
+                return _fail("Error from server (NotFound): the server could not find the requested resource")
+            items = [{"groupVersion": served, "version": served.split("/", 1)[1]} for served in versions]
+            return _ok(json.dumps({"kind": "APIGroup", "name": api_version, "versions": items}))
         if api_version not in self.served:
             return _fail("Error from server (NotFound): the server could not find the requested resource")
         resources = [

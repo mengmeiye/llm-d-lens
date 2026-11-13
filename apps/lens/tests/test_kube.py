@@ -76,6 +76,21 @@ def test_writes_stay_in_the_namespace(kube, cluster):
     assert not [call for call in cluster.calls if call[0] in ("apply", "delete")]
 
 
+def test_delete_asks_discovery_whether_a_resource_is_namespaced(kube, cluster):
+    # kubectl ignores -n for a cluster-scoped resource, so delete refuses one, by the cluster's own answer.
+    cluster.serve("example.com/v1", "ClusterWidget", "clusterwidgets", namespaced=False)
+    cluster.serve("example.com/v2", "Widget", "widgets")
+    cluster.put("team-a", {"apiVersion": "example.com/v2", "kind": "Widget", "metadata": {"name": "w"}})
+    for api_version in ("example.com/v1", "v1", ""):  # recorded right, recorded as another group's, not given
+        with pytest.raises(PolicyError, match="refusing to delete"):
+            kube.delete("clusterwidgets.example.com", "x", "team-a", api_version=api_version)
+    with pytest.raises(PolicyError, match="refusing to delete"):
+        kube.delete("gadgets.example.com", "x", "team-a")  # a resource the cluster does not serve
+    assert not [call for call in cluster.calls if call[0] == "delete"]
+    # A namespaced kind recorded at a version the cluster no longer serves is found through its group.
+    assert kube.delete("widgets.example.com", "w", "team-a", api_version="example.com/v1alpha1") is True
+
+
 def test_access_reviews(kube, cluster):
     cluster.denied.add(("delete", "deployments.apps"))
     checks = [("create", "", "configmaps", "team-a"), ("delete", "apps", "deployments", "team-a")]

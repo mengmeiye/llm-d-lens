@@ -1,11 +1,11 @@
 """The kubectl/oc adapter. Every call names the one target namespace.
 
-* API discovery uses ``get --raw /api/v1`` and ``/apis/<group>/<version>``, which every
-  authenticated user may read; it gives each kind's scope and plural name.
+* API discovery uses ``get --raw /api/v1``, ``/apis/<group>`` and ``/apis/<group>/<version>``, which
+  every authenticated user may read; it gives each kind's scope and plural name.
 * Permission checks submit SelfSubjectAccessReviews in one ``create -f -`` call.
 * Writes stay in the target namespace: ``apply`` refuses a cluster-scoped object or one that
-  names another namespace, and ``delete`` refuses a cluster-scoped resource, since kubectl
-  ignores ``-n`` for those.
+  names another namespace, and ``delete`` refuses any resource discovery does not report as
+  namespaced, since kubectl ignores ``-n`` for a cluster-scoped one.
 * Objects llmd creates are applied with server-side apply under the ``llm-d-lens`` field
   manager. Objects of an imported stack are applied the way the team applies them
   (``kubectl apply``, client-side), so the team's own ``kubectl apply`` keeps working.
@@ -66,6 +66,8 @@ class Kube:
         self.target = target or Target()
         self._runner = runner
         self._discovery: dict[str, dict[str, ApiResource] | None] = {}
+        #: API group -> the versions the cluster serves for it.
+        self._group_versions: dict[str, list[str]] = {}
         #: What ``prefetch`` read, (namespace, resource, name) -> object or None, until ``forget``.
         self._objects: dict[tuple[str, str, str], dict[str, Any] | None] = {}
         #: Called with a short line before each slow step (the CLI prints it on stderr).
@@ -149,6 +151,38 @@ class Kube:
         """True when namespaced, False when cluster-scoped, None when the cluster does not serve it."""
         found = self.resource(api_version, kind)
         return None if found is None else found.namespaced
+
+    def namespaced(self, resource: str, api_version: str = "") -> bool | None:
+        """Whether a ``plural.group`` resource is namespaced, by discovery: at ``api_version`` (the
+        version a record names) when it is of that group, else at each version the cluster serves for
+        the group, since a kind has one scope in all its versions. None when the cluster serves none."""
+        plural, _, group = resource.partition(".")
+
+        def at(version: str) -> bool | None:
+            found = [item for item in (self.resources(version) or {}).values() if item.plural == plural]
+            return found[0].namespaced if found else None
+
+        if api_version and api_group(api_version) == group and (answer := at(api_version)) is not None:
+            return answer
+        for version in self._served_versions(group):
+            if (answer := at(version)) is not None:
+                return answer
+        return None
+
+    def _served_versions(self, group: str) -> list[str]:
+        """The group/versions the cluster serves for an API group (``v1`` for the core group)."""
+        if not group:
+            return ["v1"]
+        if group not in self._group_versions:
+            result = self.run("get", "--raw", f"/apis/{group}", timeout=60)
+            if result.ok:
+                versions = json.loads(result.stdout or "{}").get("versions") or []
+                self._group_versions[group] = [item["groupVersion"] for item in versions if item.get("groupVersion")]
+            elif "NotFound" in result.message or "could not find" in result.message:
+                self._group_versions[group] = []
+            else:
+                raise CommandError(f"API discovery for {group} failed: {result.message}")
+        return self._group_versions[group]
 
     # -- reads ---------------------------------------------------------------------------------------
     def access_reviews(self, checks: list[tuple[str, str, str, str]]) -> list[bool | None]:
@@ -275,8 +309,10 @@ class Kube:
             )
         return yamlio.kubectl_objects(result.stdout)
 
-    def delete(self, resource: str, name: str, namespace: str, *, wait: bool = False) -> bool:
-        if not self._namespaced_resource(resource):
+    def delete(self, resource: str, name: str, namespace: str, *, wait: bool = False, api_version: str = "") -> bool:
+        """Delete one object of ``namespace``. ``api_version`` is the version a record names, where
+        discovery looks first for whether ``resource`` is namespaced."""
+        if self.namespaced(resource, api_version) is not True:
             raise PolicyError(f"refusing to delete {resource}/{name}: it is not a namespaced resource")
         self._objects.clear()
         result = self.run(
@@ -304,17 +340,6 @@ class Kube:
         if self.scope(document["apiVersion"], document["kind"]) is False:
             raise PolicyError(f"refusing to apply {ref}: it is cluster-scoped")
 
-    def _namespaced_resource(self, resource: str) -> bool:
-        """Whether a ``plural.group`` resource is namespaced, by the discovery done so far; a
-        resource discovery has not seen is taken as namespaced only when it is not a known
-        cluster-scoped one."""
-        plural, _, group = resource.partition(".")
-        for found in self._discovery.values():
-            for item in (found or {}).values():
-                if item.plural == plural and item.group == group:
-                    return item.namespaced
-        return plural not in _CLUSTER_SCOPED_PLURALS
-
     def require(self, resource: str, name: str, namespace: str) -> dict[str, Any]:
         found = self.get(resource, name, namespace)
         if found is None:
@@ -324,23 +349,6 @@ class Kube:
 
 #: Names per ``kubectl get`` in a prefetch: well inside any command-line length limit.
 _NAMES_PER_GET = 100
-
-#: Resources kubectl would delete cluster-wide whatever ``-n`` says, when discovery has not run.
-_CLUSTER_SCOPED_PLURALS = {
-    "namespaces",
-    "nodes",
-    "persistentvolumes",
-    "clusterroles",
-    "clusterrolebindings",
-    "customresourcedefinitions",
-    "storageclasses",
-    "priorityclasses",
-    "securitycontextconstraints",
-    "validatingwebhookconfigurations",
-    "mutatingwebhookconfigurations",
-    "validatingadmissionpolicies",
-    "validatingadmissionpolicybindings",
-}
 
 
 def _in_cluster() -> bool:

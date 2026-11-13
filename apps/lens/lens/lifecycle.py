@@ -106,7 +106,7 @@ def _prune(kube: Kube, namespace: str, instance: str, stale: list[dict[str, Any]
             continue
         live = kube.get(item["resource"], item["name"], namespace)
         if _owned(live, instance):
-            kube.delete(item["resource"], item["name"], namespace)
+            kube.delete(item["resource"], item["name"], namespace, api_version=item.get("apiVersion", ""))
             pruned.append(f"{item['kind']}/{item['name']}")
     return pruned
 
@@ -159,7 +159,7 @@ def teardown(
         if not same or (not imported and not _owned(live, instance)):
             skipped.append(ref)
             continue
-        kube.delete(item["resource"], item["name"], namespace)
+        kube.delete(item["resource"], item["name"], namespace, api_version=item.get("apiVersion", ""))
         deleted.append(ref)
     if kept:
         inventory.write(kube, {**record, "phase": "Removed", "objects": kept})
