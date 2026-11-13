@@ -133,6 +133,20 @@ def teardown(
         }
     targets = [item for item in record["objects"] if delete_volumes or item["kind"] not in KEPT_KINDS]
     kept = [item for item in record["objects"] if item not in targets]
+    # kubectl ignores -n for a cluster-scoped resource. llmd records namespaced objects only, so an entry
+    # discovery reports as cluster-scoped was added by hand: refused before anything is removed.
+    outside = [
+        f"{item['kind']}/{item['name']}"
+        for item in targets
+        if kube.namespaced(item["resource"], item.get("apiVersion", "")) is False
+    ]
+    if outside:
+        raise PolicyError(
+            f"the record of {instance} lists objects that are not namespaced ({', '.join(outside)}); "
+            "nothing was removed",
+            hint=f"llmd records namespaced objects only; inspect ConfigMap {inventory.inventory_name(instance)} "
+            f"in {namespace}.",
+        )
     names = sorted({item["resource"] for item in targets} | {"configmaps"})
     answers = kube.access_reviews([("delete", *_split(name), namespace) for name in names])
     denied = [name for name, allowed in zip(names, answers, strict=True) if allowed is False]

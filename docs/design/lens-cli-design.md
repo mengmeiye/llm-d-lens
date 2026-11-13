@@ -418,6 +418,11 @@ Local paths follow the [storage layout](storage-layout.md).
   interrupted standup can still be torn down.
 - An object is deleted only while its live UID equals the recorded `uid` and,
   for `mode: llmd`, while it still carries the instance label.
+- An object is deleted only when API discovery reports its resource as
+  namespaced (at the recorded `apiVersion`, else at any version the cluster
+  serves for its group), since `kubectl` ignores `-n` for a cluster-scoped one.
+  `teardown` checks every entry first and refuses the record, deleting nothing,
+  when one is cluster-scoped.
 - `PersistentVolumeClaim` entries are kept by `teardown` unless
   `--delete-volumes` is passed; the record then stays with `phase: Removed`.
 - A plan's digest is SHA-256 over sorted JSON of namespace, instance and

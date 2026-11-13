@@ -113,7 +113,8 @@ that check off. The metrics are then served without authentication inside the cl
 
 `standup` records the instance before it applies anything, then applies with server-side apply. It also
 records the `--var` and `--set` values with the instance. `teardown` deletes exactly the recorded objects whose
-UID still matches. Claims are kept unless you pass `--delete-volumes`.
+UID still matches. Claims are kept unless you pass `--delete-volumes`. A record that lists an object the cluster
+reports as cluster-scoped is refused before anything is deleted, since `kubectl` ignores `-n` for such an object.
 
 ## Companions
 

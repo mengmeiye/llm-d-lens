@@ -60,6 +60,30 @@ def test_teardown_checks_delete_permission_before_anything(llmrepo, cluster):  #
     assert inventory.require(kube, "team-a", "r1")["phase"] == "Applied"
 
 
+def test_teardown_refuses_a_record_that_lists_a_cluster_scoped_object(llmrepo, cluster):  # noqa: F811
+    # llmd records namespaced objects only. A record edited by hand to list a cluster-scoped one, with its
+    # UID and the instance's labels, is refused before anything is removed.
+    kube = stood_up(llmrepo, cluster)
+    cluster.serve("example.com/v1", "ClusterWidget", "clusterwidgets", namespaced=False)
+    labels = {"app.kubernetes.io/managed-by": "llm-d-lens", "lens.llm-d.ai/instance": "r1"}
+    widget = {"apiVersion": "example.com/v1", "kind": "ClusterWidget", "metadata": {"name": "w", "labels": labels}}
+    stored = cluster.put("", widget)
+    record = inventory.require(kube, "team-a", "r1")
+    entry = {
+        "apiVersion": "example.com/v1",
+        "kind": "ClusterWidget",
+        "name": "w",
+        "resource": "clusterwidgets.example.com",
+        "uid": stored["metadata"]["uid"],
+    }
+    inventory.write(kube, {**record, "objects": [*record["objects"], entry]})
+    with pytest.raises(PolicyError, match="nothing was removed"):
+        lifecycle.teardown(kube, "team-a", "r1")
+    assert cluster.get("", "clusterwidgets.example.com", "w") is not None
+    assert cluster.get("team-a", "deployments.apps", "model-a") is not None
+    assert inventory.require(kube, "team-a", "r1")["phase"] == "Applied"
+
+
 def test_forget_leaves_every_object(llmrepo, cluster):  # noqa: F811
     kube = stood_up(llmrepo, cluster)
     assert lifecycle.teardown(kube, "team-a", "r1", forget=True)["forgot"]
